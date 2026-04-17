@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Scrapling UI — Extract job data from Naukrigulf, LinkedIn, and any website. Export to Excel instantly.">
+    <title>Scrapling UI — Web Scraper Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🕷️</text></svg>">
+</head>
+<body>
+    <!-- Toast Notifications -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <div class="app-container">
+        <!-- ═══ Header ═══ -->
+        <header class="app-header">
+            <div class="logo">
+                <div class="logo-icon">🕷️</div>
+                <div>
+                    <h1>Scrapling UI</h1>
+                    <div class="subtitle">Web Scraper Dashboard</div>
+                </div>
+            </div>
+            <div class="header-stats">
+                <div class="stat-item">
+                    <div class="stat-value" id="stat-jobs">0</div>
+                    <div class="stat-label">Scrapes</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="stat-items">0</div>
+                    <div class="stat-label">Items Found</div>
+                </div>
+            </div>
+        </header>
+
+        <!-- ═══ Main Grid ═══ -->
+        <div class="main-grid">
+            <!-- ─── Left: Controls ─── -->
+            <div style="display: flex; flex-direction: column; gap: 20px;">
+                <!-- Scrape Form -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">
+                            <div class="icon">🎯</div>
+                            New Scrape
+                        </div>
+                    </div>
+                    <div class="panel-body">
+                        <!-- Site Type Tabs -->
+                        <div class="site-tabs">
+                            <button class="site-tab active" data-type="auto" onclick="selectSiteTab('auto')">Auto</button>
+                            <button class="site-tab" data-type="naukrigulf" onclick="selectSiteTab('naukrigulf')">Naukrigulf</button>
+                            <button class="site-tab" data-type="linkedin" onclick="selectSiteTab('linkedin')">LinkedIn</button>
+                            <button class="site-tab" data-type="generic" onclick="selectSiteTab('generic')">Custom</button>
+                        </div>
+
+                        <!-- Hidden select for programmatic access -->
+                        <select id="site-type" style="display: none;">
+                            <option value="auto">Auto Detect</option>
+                            <option value="naukrigulf">Naukrigulf</option>
+                            <option value="linkedin">LinkedIn</option>
+                            <option value="generic">Custom URL</option>
+                        </select>
+
+                        <!-- URL Input -->
+                        <div class="form-group">
+                            <label class="form-label">Target URL</label>
+                            <input 
+                                type="url" 
+                                id="url-input" 
+                                class="form-input" 
+                                placeholder="https://www.naukrigulf.com/jobs-in-uae"
+                                autocomplete="url"
+                            >
+                            <div class="input-note">Paste a job search page URL from Naukrigulf, LinkedIn, or any website</div>
+                        </div>
+
+                        <!-- Max Pages -->
+                        <div class="form-group">
+                            <label class="form-label">Max Pages to Scrape</label>
+                            <div class="range-group">
+                                <input type="range" id="max-pages" min="1" max="20" value="5">
+                                <span class="range-value" id="max-pages-value">5</span>
+                            </div>
+                        </div>
+
+                        <!-- Scrape Button -->
+                        <button id="scrape-btn" class="btn btn-primary" onclick="startScrape()">
+                            <span id="scrape-btn-spinner" class="spinner" style="display: none;"></span>
+                            <span id="scrape-btn-text">🚀 Start Scraping</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Quick Presets -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">
+                            <div class="icon">⚡</div>
+                            Quick Presets
+                        </div>
+                    </div>
+                    <div class="panel-body">
+                        <div class="presets-grid">
+                            <button class="preset-btn" onclick="setPreset('naukrigulf-jobs')">
+                                <span class="preset-icon">🇦🇪</span>
+                                <span>Naukrigulf — All Jobs</span>
+                            </button>
+                            <button class="preset-btn" onclick="setPreset('naukrigulf-it')">
+                                <span class="preset-icon">💻</span>
+                                <span>Naukrigulf — IT Jobs</span>
+                            </button>
+                            <button class="preset-btn" onclick="setPreset('linkedin-jobs')">
+                                <span class="preset-icon">🔗</span>
+                                <span>LinkedIn — UAE Jobs</span>
+                            </button>
+                            <button class="preset-btn" onclick="setPreset('linkedin-it')">
+                                <span class="preset-icon">🖥️</span>
+                                <span>LinkedIn — IT Jobs</span>
+                            </button>
+                        </div>
+                        <div class="input-note" style="margin-top: 12px;">Click a preset to auto-fill the URL and site type</div>
+                    </div>
+                </div>
+
+                <!-- History -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">
+                            <div class="icon">📋</div>
+                            Scrape History
+                        </div>
+                    </div>
+                    <div id="history-list" class="history-list">
+                        <div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px;">
+                            No previous scrapes yet
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ─── Right: Results ─── -->
+            <div class="panel results-area" id="results-panel">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        <div class="icon">📊</div>
+                        Extracted Data
+                    </div>
+                </div>
+
+                <!-- Results Toolbar (hidden until results) -->
+                <div id="results-toolbar" class="results-toolbar" style="display: none;">
+                    <div class="results-count" id="result-count">
+                        Showing <strong>0</strong> results
+                    </div>
+                    <div class="results-actions">
+                        <div class="search-wrapper">
+                            <input type="text" id="search-filter" class="search-input" placeholder="Filter results...">
+                        </div>
+                        <select id="sort-select" class="form-select" style="width: auto; padding-top: 8px; padding-bottom: 8px;">
+                            <option value="default">Default Sort</option>
+                            <option value="recent">Newest First</option>
+                            <option value="oldest">Oldest First</option>
+                        </select>
+                        <button class="btn btn-success btn-sm" onclick="exportExcel()">
+                            📥 Export Excel
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Results Content -->
+                <div id="results-body">
+                    <div class="empty-state">
+                        <div class="empty-icon">🕸️</div>
+                        <h3>No Data Yet</h3>
+                        <p>Enter a URL and hit "Start Scraping" to extract data. Results will appear here in a table.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

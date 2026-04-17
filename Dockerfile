@@ -1,33 +1,31 @@
 FROM python:3.11-slim
 
-# Set up working directory
-WORKDIR /app
-
-# Install system dependencies required for Playwright/Headless Chrome
-RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy python dependencies file
-COPY requirements.txt .
-
-# Install python packages
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Install Playwright browser dependencies (Chromium only to save space)
-RUN playwright install chromium
+# 1. Update OS and install Playwright OS dependencies as root
+RUN apt-get update && apt-get install -y wget gnupg && rm -rf /var/lib/apt/lists/*
+RUN pip install playwright
 RUN playwright install-deps chromium
 
-# Copy all application files to container
-COPY . .
+# 2. Set up the non-root user as required by Hugging Face
+RUN useradd -m -u 1000 user
+USER user
+ENV PATH="/home/user/.local/bin:$PATH"
 
-# Hugging Face requires running on port 7860
+WORKDIR /app
+
+# 3. Copy requirements and install Python dependencies
+COPY --chown=user requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 4. Install the actual Headless Chromium browser as the non-root user
+RUN playwright install chromium
+
+# 5. Copy the rest of the application
+COPY --chown=user . /app
+
+# 6. Configure Hugging Face port
 ENV PORT=7860
 EXPOSE 7860
 
-# Adjust working directory to where the Flask app lives
+# 7. Start the application
 WORKDIR /app/scraper_ui
-
-# Run the flask server using gunicorn for production
 CMD ["gunicorn", "-b", "0.0.0.0:7860", "app:app", "--timeout", "120", "--workers", "2", "--threads", "4"]

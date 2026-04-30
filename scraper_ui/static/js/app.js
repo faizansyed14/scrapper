@@ -8,12 +8,13 @@ let pollInterval = null;
 let allResults = [];
 let totalJobs = 0;
 let totalItems = 0;
+let isViewingDatabase = false;
+let currentDbSource = '';
 
 // ── DOM References ──────────────────────────────────────
 const urlInput = document.getElementById('url-input');
 const siteSelect = document.getElementById('site-type');
-const maxPagesRange = document.getElementById('max-pages');
-const maxPagesValue = document.getElementById('max-pages-value');
+const maxPagesInput = document.getElementById('max-pages');
 const scrapeBtn = document.getElementById('scrape-btn');
 const scrapeBtnText = document.getElementById('scrape-btn-text');
 const scrapeBtnSpinner = document.getElementById('scrape-btn-spinner');
@@ -23,20 +24,17 @@ const resultToolbar = document.getElementById('results-toolbar');
 const historyList = document.getElementById('history-list');
 const searchInput = document.getElementById('search-filter');
 const sortSelect = document.getElementById('sort-select');
-const statJobs = document.getElementById('stat-jobs');
 const statItems = document.getElementById('stat-items');
+const statDb = document.getElementById('stat-db');
 
 // ── Initialize ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     loadHistory();
+    loadDbStats();
     setupEventListeners();
 });
 
 function setupEventListeners() {
-    // Range slider
-    maxPagesRange.addEventListener('input', () => {
-        maxPagesValue.textContent = maxPagesRange.value;
-    });
 
     // Search filter
     searchInput.addEventListener('input', () => {
@@ -55,30 +53,50 @@ function setupEventListeners() {
 }
 
 // ── Presets ──────────────────────────────────────────────
-function setPreset(type) {
-    // Remove active class from all preset buttons
-    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
-    event.currentTarget.classList.add('active');
-
-    switch (type) {
-        case 'naukrigulf-jobs':
-            urlInput.value = 'https://www.naukrigulf.com/jobs-in-uae';
-            setSiteType('naukrigulf');
-            break;
-        case 'naukrigulf-it':
-            urlInput.value = 'https://www.naukrigulf.com/it-jobs-in-uae';
-            setSiteType('naukrigulf');
-            break;
-        case 'linkedin-jobs':
-            urlInput.value = 'https://www.linkedin.com/jobs/search/?location=United%20Arab%20Emirates';
-            setSiteType('linkedin');
-            break;
-        case 'linkedin-it':
-            urlInput.value = 'https://www.linkedin.com/jobs/search/?keywords=IT&location=United%20Arab%20Emirates';
-            setSiteType('linkedin');
-            break;
-    }
+function applyPreset(portal) {
+    const country = document.getElementById('preset-country').value;
+    
+    // Default config mapping
+    const configs = {
+        'naukrigulf': {
+            'uae': 'https://www.naukrigulf.com/jobs-in-uae',
+            'ksa': 'https://www.naukrigulf.com/jobs-in-saudi-arabia',
+            'qatar': 'https://www.naukrigulf.com/jobs-in-qatar',
+            'kuwait': 'https://www.naukrigulf.com/jobs-in-kuwait'
+        },
+        'linkedin': {
+            'uae': 'https://www.linkedin.com/jobs/search/?location=United%20Arab%20Emirates',
+            'ksa': 'https://www.linkedin.com/jobs/search/?location=Saudi%20Arabia',
+            'qatar': 'https://www.linkedin.com/jobs/search/?location=Qatar',
+            'kuwait': 'https://www.linkedin.com/jobs/search/?location=Kuwait'
+        },
+        'gulftalent': {
+            'uae': 'https://www.gulftalent.com/uae/jobs',
+            'ksa': 'https://www.gulftalent.com/saudi-arabia/jobs',
+            'qatar': 'https://www.gulftalent.com/qatar/jobs',
+            'kuwait': 'https://www.gulftalent.com/kuwait/jobs'
+        },
+        'bayt': {
+            'uae': 'https://www.bayt.com/en/uae/jobs/',
+            'ksa': 'https://www.bayt.com/en/saudi-arabia/jobs/',
+            'qatar': 'https://www.bayt.com/en/qatar/jobs/',
+            'kuwait': 'https://www.bayt.com/en/kuwait/jobs/'
+        }
+    };
+    
+    urlInput.value = configs[portal][country];
+    setSiteType(portal);
 }
+
+// Update preset labels when country changes
+document.getElementById('preset-country').addEventListener('change', (e) => {
+    const text = e.target.options[e.target.selectedIndex].text;
+    const shortText = text.includes('(') ? text.split('(')[1].replace(')', '') : text;
+    document.querySelectorAll('.country-label').forEach(el => {
+        el.textContent = shortText;
+    });
+});
+
 
 function setSiteType(type) {
     siteSelect.value = type;
@@ -99,6 +117,10 @@ urlInput.addEventListener('input', () => {
         setSiteType('naukrigulf');
     } else if (url.includes('linkedin')) {
         setSiteType('linkedin');
+    } else if (url.includes('gulftalent')) {
+        setSiteType('gulftalent');
+    } else if (url.includes('bayt')) {
+        setSiteType('bayt');
     } else if (url.length > 10) {
         setSiteType('auto');
     }
@@ -129,6 +151,7 @@ async function startScrape() {
 
     // Show loading state in results
     showLoadingState();
+    isViewingDatabase = false;
 
     try {
         const response = await fetch('/api/scrape', {
@@ -136,7 +159,7 @@ async function startScrape() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 url: url,
-                max_pages: parseInt(maxPagesRange.value),
+                max_pages: parseInt(maxPagesInput.value) || 5,
                 site_type: siteSelect.value,
             }),
         });
@@ -206,23 +229,20 @@ function renderResults(data) {
         return;
     }
 
-    // Get all unique keys (excluding internal ones)
-    const excludeKeys = ['source', 'page'];
-    const keys = [];
-    data.forEach(row => {
-        Object.keys(row).forEach(key => {
-            if (!keys.includes(key) && !excludeKeys.includes(key)) {
-                keys.push(key);
-            }
-        });
-    });
+    // Defined column order
+    const columnOrder = ['title', 'company', 'location', 'experience', 'posted'];
+    
+    // Find which keys from our order exist in the data
+    const keys = columnOrder.filter(key => 
+        data.some(row => row.hasOwnProperty(key))
+    );
 
     let html = `
         <div class="table-container">
             <table class="data-table">
                 <thead>
                     <tr>
-                        <th>#</th>
+                        <th style="width: 50px">#</th>
                         ${keys.map(k => `<th>${escapeHtml(formatHeader(k))}</th>`).join('')}
                     </tr>
                 </thead>
@@ -235,11 +255,7 @@ function renderResults(data) {
 
         keys.forEach(key => {
             let value = row[key] || '';
-            if (key === 'link' && value) {
-                html += `<td><a href="${escapeHtml(value)}" target="_blank" title="${escapeHtml(value)}">Open →</a></td>`;
-            } else {
-                html += `<td title="${escapeHtml(value)}">${escapeHtml(truncate(value, 60))}</td>`;
-            }
+            html += `<td title="${escapeHtml(value)}">${escapeHtml(truncate(value, 60))}</td>`;
         });
 
         html += '</tr>';
@@ -339,7 +355,13 @@ function showErrorState(message) {
 
 function showResultsToolbar(data) {
     resultToolbar.style.display = 'flex';
-    document.getElementById('result-count').innerHTML = `Showing <strong>${data.results.length}</strong> results from <strong>${data.site_type}</strong>`;
+    if (isViewingDatabase) {
+        document.getElementById('result-count').innerHTML = `Showing <strong>${data.length}</strong> jobs from <strong>Global Database ${currentDbSource ? '('+currentDbSource+')' : '(All Portals)'}</strong>`;
+        document.getElementById('delete-db-btn').style.display = 'inline-block';
+    } else {
+        document.getElementById('result-count').innerHTML = `Showing <strong>${data.results.length}</strong> results from <strong>${data.site_type}</strong>`;
+        document.getElementById('delete-db-btn').style.display = 'none';
+    }
 }
 
 function resetScrapeButton() {
@@ -349,7 +371,6 @@ function resetScrapeButton() {
 }
 
 function updateStats() {
-    statJobs.textContent = totalJobs;
     statItems.textContent = totalItems;
 }
 
@@ -363,7 +384,11 @@ async function exportExcel() {
     showToast('Generating Excel file...', 'info');
 
     try {
-        const response = await fetch(`/api/export/${currentJobId}?sort=${sortSelect.value}`);
+        let fetchUrl = `/api/export/${currentJobId}?sort=${sortSelect.value}`;
+        if (isViewingDatabase) {
+            fetchUrl = currentDbSource ? `/api/database/export?source=${currentDbSource}` : `/api/database/export`;
+        }
+        const response = await fetch(fetchUrl);
 
         if (response.ok) {
             const blob = await response.blob();
@@ -437,6 +462,7 @@ async function viewJob(jobId) {
         const data = await response.json();
 
         currentJobId = jobId;
+        isViewingDatabase = false;
         allResults = data.results;
         searchInput.value = '';
         sortSelect.value = 'default';
@@ -466,6 +492,118 @@ async function deleteJob(jobId) {
         showToast('Job deleted', 'info');
     } catch (error) {
         showToast('Failed to delete job', 'error');
+    }
+}
+
+// ── Database ────────────────────────────────────────────
+async function loadDbStats() {
+    try {
+        const response = await fetch('/api/database');
+        const data = await response.json();
+        statDb.textContent = data.length;
+    } catch (error) {
+        console.error('Failed to load DB stats', error);
+    }
+}
+
+function showView(view, source = '') {
+    // Update nav active states
+    document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+    
+    const dbControls = document.getElementById('db-portal-tabs');
+    const topControls = document.getElementById('top-controls');
+    const resultsPanelHeader = document.getElementById('results-panel-header');
+    
+    if (view === 'database') {
+        isViewingDatabase = true;
+        currentDbSource = source;
+        dbControls.style.display = 'flex';
+        if (topControls) topControls.style.display = 'none';
+        resultsPanelHeader.style.display = 'none'; // hide the regular header because we have tabs
+        
+        // Highlight correct nav link
+        document.querySelector('.nav-dropdown .nav-link').classList.add('active');
+        
+        viewDatabase(source);
+    } else {
+        isViewingDatabase = false;
+        currentDbSource = '';
+        dbControls.style.display = 'none';
+        if (topControls) topControls.style.display = 'grid';
+        resultsPanelHeader.style.display = 'flex';
+        
+        // Highlight nav link
+        document.querySelector('.nav-link[onclick="showView(\'scraper\')"]').classList.add('active');
+        
+        // If we have a current scrape job, view it, else show empty
+        if (currentJobId && currentJobId !== 'database') {
+            viewJob(currentJobId);
+        } else {
+            showEmptyState();
+        }
+    }
+}
+
+async function viewDatabase(source = '') {
+    showLoadingState();
+    try {
+        currentDbSource = source;
+        const fetchUrl = source ? `/api/database?source=${source}` : '/api/database';
+        const response = await fetch(fetchUrl);
+        const data = await response.json();
+        
+        isViewingDatabase = true;
+        currentJobId = 'database';
+        allResults = data;
+        
+        // If no source filter, update global stats
+        if (!source) {
+            statDb.textContent = data.length;
+        }
+
+        // Update DB Tabs Active State
+        document.querySelectorAll('.db-tab-btn').forEach(btn => {
+            btn.classList.remove('active');
+            if (btn.textContent.includes(source || 'All Portals')) {
+                btn.classList.add('active');
+            }
+        });
+
+        searchInput.value = '';
+        sortSelect.value = 'recent';
+        applyFiltersAndSort();
+        showResultsToolbar(data);
+
+        // Deselect history items
+        document.querySelectorAll('.history-item').forEach(item => {
+            item.classList.remove('active');
+        });
+        
+        showToast(source ? `Loaded ${source} Database` : 'Loaded Global Database', 'success');
+    } catch (error) {
+        showErrorState('Failed to load database');
+        showToast('Error loading database', 'error');
+    }
+}
+
+async function deleteDatabase() {
+    const confirmMsg = currentDbSource ? `Are you sure you want to delete ALL ${currentDbSource} jobs from the database?` : `Are you sure you want to completely clear the entire database? This cannot be undone.`;
+    
+    if (!confirm(confirmMsg)) return;
+
+    try {
+        const fetchUrl = currentDbSource ? `/api/database/clear?source=${currentDbSource}` : '/api/database/clear';
+        const response = await fetch(fetchUrl, { method: 'DELETE' });
+        
+        if (response.ok) {
+            showToast('Database deleted successfully', 'success');
+            loadDbStats();
+            viewDatabase(currentDbSource);
+        } else {
+            showToast('Failed to delete database', 'error');
+        }
+    } catch (error) {
+        showToast('Failed to delete database', 'error');
     }
 }
 

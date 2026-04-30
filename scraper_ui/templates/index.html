@@ -13,114 +13,159 @@
     <div id="toast-container" class="toast-container"></div>
 
     <div class="app-container">
-        <!-- ═══ Header ═══ -->
-        <header class="app-header">
-            <div class="logo">
+        <!-- ═══ Nav Bar ═══ -->
+        <nav class="top-nav">
+            <div class="nav-brand">
                 <div class="logo-icon">🕷️</div>
-                <div>
-                    <h1>Scrapling UI</h1>
-                    <div class="subtitle">Web Scraper Dashboard</div>
+                <span>Scrapling UI</span>
+            </div>
+            <div class="nav-links">
+                <a href="#" class="nav-link active" onclick="showView('scraper')">Scraper</a>
+                <div class="nav-dropdown">
+                    <a href="#" class="nav-link" onclick="showView('database', '')">Database ▾</a>
+                    <div class="nav-dropdown-content">
+                        <a href="#" onclick="showView('database', '')">All Jobs</a>
+                        <a href="#" onclick="showView('database', 'Naukrigulf')">Naukrigulf</a>
+                        <a href="#" onclick="showView('database', 'LinkedIn')">LinkedIn</a>
+                        <a href="#" onclick="showView('database', 'GulfTalent')">GulfTalent</a>
+                        <a href="#" onclick="showView('database', 'Bayt')">Bayt</a>
+                    </div>
                 </div>
             </div>
             <div class="header-stats">
                 <div class="stat-item">
-                    <div class="stat-value" id="stat-jobs">0</div>
-                    <div class="stat-label">Scrapes</div>
+                    <div class="stat-value" id="stat-items">0</div>
+                    <div class="stat-label">Session Items</div>
                 </div>
                 <div class="stat-item">
-                    <div class="stat-value" id="stat-items">0</div>
-                    <div class="stat-label">Items Found</div>
+                    <div class="stat-value" id="stat-db">0</div>
+                    <div class="stat-label">DB Total Size</div>
                 </div>
             </div>
-        </header>
+        </nav>
 
-        <!-- ═══ Main Grid ═══ -->
-        <div class="main-grid">
-            <!-- ─── Left: Controls ─── -->
-            <div style="display: flex; flex-direction: column; gap: 20px;">
-                <!-- Scrape Form -->
-                <div class="panel">
-                    <div class="panel-header">
-                        <div class="panel-title">
-                            <div class="icon">🎯</div>
-                            New Scrape
-                        </div>
-                    </div>
-                    <div class="panel-body">
-                        <!-- Site Type Tabs -->
-                        <div class="site-tabs">
-                            <button class="site-tab active" data-type="auto" onclick="selectSiteTab('auto')">Auto</button>
-                            <button class="site-tab" data-type="naukrigulf" onclick="selectSiteTab('naukrigulf')">Naukrigulf</button>
-                            <button class="site-tab" data-type="linkedin" onclick="selectSiteTab('linkedin')">LinkedIn</button>
-                            <button class="site-tab" data-type="generic" onclick="selectSiteTab('generic')">Custom</button>
-                        </div>
-
-                        <!-- Hidden select for programmatic access -->
-                        <select id="site-type" style="display: none;">
-                            <option value="auto">Auto Detect</option>
-                            <option value="naukrigulf">Naukrigulf</option>
-                            <option value="linkedin">LinkedIn</option>
-                            <option value="generic">Custom URL</option>
-                        </select>
-
-                        <!-- URL Input -->
-                        <div class="form-group">
-                            <label class="form-label">Target URL</label>
-                            <input 
-                                type="url" 
-                                id="url-input" 
-                                class="form-input" 
-                                placeholder="https://www.naukrigulf.com/jobs-in-uae"
-                                autocomplete="url"
-                            >
-                            <div class="input-note">Paste a job search page URL from Naukrigulf, LinkedIn, or any website</div>
-                        </div>
-
-                        <!-- Max Pages -->
-                        <div class="form-group">
-                            <label class="form-label">Max Pages to Scrape</label>
-                            <div class="range-group">
-                                <input type="range" id="max-pages" min="1" max="20" value="5">
-                                <span class="range-value" id="max-pages-value">5</span>
+        <!-- ═══ Main Content ═══ -->
+        <div class="main-layout" id="main-view">
+            <!-- ─── Top: Controls (Hidden in DB View) ─── -->
+            <div id="top-controls" class="top-controls">
+                
+                <!-- Left: New Scrape -->
+                <div style="display: flex; flex-direction: column; gap: 24px;">
+                    <!-- Scrape Form -->
+                    <div class="panel">
+                        <div class="panel-header">
+                            <div class="panel-title">
+                                <div class="icon">🎯</div>
+                                New Scrape
                             </div>
                         </div>
+                        <div class="panel-body">
+                            <!-- Site Type Tabs -->
+                            <div class="site-tabs">
+                                <button class="site-tab active" data-type="auto" onclick="selectSiteTab('auto')">Auto</button>
+                                <button class="site-tab" data-type="naukrigulf" onclick="selectSiteTab('naukrigulf')">Naukrigulf</button>
+                                <button class="site-tab" data-type="linkedin" onclick="selectSiteTab('linkedin')">LinkedIn</button>
+                                <button class="site-tab" data-type="gulftalent" onclick="selectSiteTab('gulftalent')">GulfTalent</button>
+                                <button class="site-tab" data-type="bayt" onclick="selectSiteTab('bayt')">Bayt</button>
+                                <button class="site-tab" data-type="generic" onclick="selectSiteTab('generic')">Custom</button>
+                            </div>
 
-                        <!-- Scrape Button -->
-                        <button id="scrape-btn" class="btn btn-primary" onclick="startScrape()">
-                            <span id="scrape-btn-spinner" class="spinner" style="display: none;"></span>
-                            <span id="scrape-btn-text">🚀 Start Scraping</span>
-                        </button>
+                            <!-- Hidden select for programmatic access -->
+                            <select id="site-type" style="display: none;">
+                                <option value="auto">Auto Detect</option>
+                                <option value="naukrigulf">Naukrigulf</option>
+                                <option value="linkedin">LinkedIn</option>
+                                <option value="gulftalent">GulfTalent</option>
+                                <option value="bayt">Bayt.com</option>
+                                <option value="generic">Custom URL</option>
+                            </select>
+
+                            <!-- URL Input -->
+                            <div class="form-group" style="margin-top: 15px;">
+                                <label class="form-label">Target URL</label>
+                                <input 
+                                    type="url" 
+                                    id="url-input" 
+                                    class="form-input form-input-lg" 
+                                    placeholder="https://www.naukrigulf.com/jobs-in-uae"
+                                    autocomplete="url"
+                                >
+                                <div class="input-note">Paste a job search page URL from Naukrigulf, LinkedIn, or any supported website</div>
+                            </div>
+
+                            <!-- Max Pages -->
+                            <div class="form-group">
+                                <label class="form-label">Max Pages to Scrape</label>
+                                <input 
+                                    type="number" 
+                                    id="max-pages" 
+                                    class="form-input" 
+                                    min="1" 
+                                    value="5"
+                                >
+                                <div class="input-note">Specify how many pages of results to extract (e.g., 10)</div>
+                            </div>
+
+                            <!-- Scrape Button -->
+                            <button id="scrape-btn" class="btn btn-primary" onclick="startScrape()">
+                                <span id="scrape-btn-spinner" class="spinner" style="display: none;"></span>
+                                <span id="scrape-btn-text">🚀 Start Scraping</span>
+                            </button>
+                        </div>
                     </div>
                 </div>
 
+                <!-- Right: Presets & History -->
+                <div style="display: flex; flex-direction: column; gap: 24px;">
+
                 <!-- Quick Presets -->
-                <div class="panel">
+                <div class="panel" id="presets-panel">
                     <div class="panel-header">
                         <div class="panel-title">
                             <div class="icon">⚡</div>
-                            Quick Presets
+                            Quick Presets (Gulf Countries)
                         </div>
                     </div>
                     <div class="panel-body">
+                        <div class="form-group" style="margin-bottom: 12px;">
+                            <label class="form-label">Select Country</label>
+                            <select id="preset-country" class="form-select">
+                                <option value="uae">UAE</option>
+                                <option value="ksa">Saudi Arabia (KSA)</option>
+                                <option value="qatar">Qatar</option>
+                                <option value="kuwait">Kuwait</option>
+                            </select>
+                        </div>
                         <div class="presets-grid">
-                            <button class="preset-btn" onclick="setPreset('naukrigulf-jobs')">
-                                <span class="preset-icon">🇦🇪</span>
-                                <span>Naukrigulf — All Jobs</span>
+                            <button class="preset-btn" onclick="applyPreset('naukrigulf')">
+                                <div class="preset-icon">🇦🇪</div>
+                                <div class="preset-text">
+                                    <span class="preset-title">Naukrigulf</span>
+                                    <span class="preset-desc"><span class="country-label">UAE</span> Jobs</span>
+                                </div>
                             </button>
-                            <button class="preset-btn" onclick="setPreset('naukrigulf-it')">
-                                <span class="preset-icon">💻</span>
-                                <span>Naukrigulf — IT Jobs</span>
+                            <button class="preset-btn" onclick="applyPreset('linkedin')">
+                                <div class="preset-icon">🔗</div>
+                                <div class="preset-text">
+                                    <span class="preset-title">LinkedIn</span>
+                                    <span class="preset-desc"><span class="country-label">UAE</span> Jobs</span>
+                                </div>
                             </button>
-                            <button class="preset-btn" onclick="setPreset('linkedin-jobs')">
-                                <span class="preset-icon">🔗</span>
-                                <span>LinkedIn — UAE Jobs</span>
+                            <button class="preset-btn" onclick="applyPreset('gulftalent')">
+                                <div class="preset-icon">🌍</div>
+                                <div class="preset-text">
+                                    <span class="preset-title">GulfTalent</span>
+                                    <span class="preset-desc"><span class="country-label">UAE</span> Jobs</span>
+                                </div>
                             </button>
-                            <button class="preset-btn" onclick="setPreset('linkedin-it')">
-                                <span class="preset-icon">🖥️</span>
-                                <span>LinkedIn — IT Jobs</span>
+                            <button class="preset-btn" onclick="applyPreset('bayt')">
+                                <div class="preset-icon">🏹</div>
+                                <div class="preset-text">
+                                    <span class="preset-title">Bayt</span>
+                                    <span class="preset-desc"><span class="country-label">UAE</span> Jobs</span>
+                                </div>
                             </button>
                         </div>
-                        <div class="input-note" style="margin-top: 12px;">Click a preset to auto-fill the URL and site type</div>
                     </div>
                 </div>
 
@@ -138,15 +183,25 @@
                         </div>
                     </div>
                 </div>
-            </div>
+            </div> <!-- End Right Column -->
+        </div> <!-- End Top Controls -->
 
-            <!-- ─── Right: Results ─── -->
+            <!-- ─── Right: Results & Database ─── -->
             <div class="panel results-area" id="results-panel">
-                <div class="panel-header">
-                    <div class="panel-title">
+                <div class="panel-header" id="results-panel-header">
+                    <div class="panel-title" id="results-title">
                         <div class="icon">📊</div>
-                        Extracted Data
+                        <span>Extracted Data</span>
                     </div>
+                </div>
+
+                <!-- Database Portal Tabs (Visible only in DB View) -->
+                <div id="db-portal-tabs" class="db-portal-tabs" style="display: none;">
+                    <button class="db-tab-btn active" onclick="viewDatabase('')">All Portals</button>
+                    <button class="db-tab-btn" onclick="viewDatabase('Naukrigulf')">Naukrigulf</button>
+                    <button class="db-tab-btn" onclick="viewDatabase('LinkedIn')">LinkedIn</button>
+                    <button class="db-tab-btn" onclick="viewDatabase('GulfTalent')">GulfTalent</button>
+                    <button class="db-tab-btn" onclick="viewDatabase('Bayt')">Bayt</button>
                 </div>
 
                 <!-- Results Toolbar (hidden until results) -->
@@ -156,14 +211,17 @@
                     </div>
                     <div class="results-actions">
                         <div class="search-wrapper">
-                            <input type="text" id="search-filter" class="search-input" placeholder="Filter results...">
+                            <input type="text" id="search-filter" class="search-input" placeholder="🔍 Filter results...">
                         </div>
-                        <select id="sort-select" class="form-select" style="width: auto; padding-top: 8px; padding-bottom: 8px;">
+                        <select id="sort-select" class="form-select" style="width: auto;">
                             <option value="default">Default Sort</option>
                             <option value="recent">Newest First</option>
                             <option value="oldest">Oldest First</option>
                         </select>
-                        <button class="btn btn-success btn-sm" onclick="exportExcel()">
+                        <button class="btn btn-danger btn-sm" id="delete-db-btn" onclick="deleteDatabase()" style="display: none;">
+                            🗑️ Delete Data
+                        </button>
+                        <button class="btn btn-success btn-sm" id="export-btn" onclick="exportExcel()">
                             📥 Export Excel
                         </button>
                     </div>

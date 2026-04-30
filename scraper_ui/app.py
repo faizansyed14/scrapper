@@ -10,9 +10,14 @@ import uuid
 import threading
 import traceback
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Flask, render_template, request, jsonify, send_file
+import database
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Add parent dir so scrapling imports work
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -21,7 +26,10 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 app = Flask(__name__)
-app.secret_key = 'scrapling-ui-secret-key'
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'scrapling-ui-secret-key-fallback')
+
+# Initialize database
+database.init_db()
 
 # In-memory storage for scrape jobs
 scrape_jobs = {}
@@ -29,11 +37,65 @@ scrape_jobs = {}
 # ─── Scraping Logic ──────────────────────────────────────────────────────────
 
 
+def get_absolute_date(relative_str):
+    """Convert relative time strings to YYYY-MM-DD format."""
+    if not relative_str:
+        return ""
+    
+    relative_str = relative_str.lower().strip()
+    now = datetime.now()
+    
+    # Check for "active", "just now", "today"
+    if any(x in relative_str for x in ['active', 'just now', 'today']):
+        return now.strftime('%Y-%m-%d')
+    
+    if 'yesterday' in relative_str:
+        return (now - timedelta(days=1)).strftime('%Y-%m-%d')
+
+    match = re.search(r'(\d+)\s*(min|hour|hr|day|week|month|year)s?', relative_str)
+    if match:
+        val = int(match.group(1))
+        unit = match.group(2)
+        
+        if unit == 'min':
+            return now.strftime('%Y-%m-%d')
+        elif unit in ['hour', 'hr']:
+            return now.strftime('%Y-%m-%d')
+        elif unit == 'day':
+            return (now - timedelta(days=val)).strftime('%Y-%m-%d')
+        elif unit == 'week':
+            return (now - timedelta(weeks=val)).strftime('%Y-%m-%d')
+        elif unit == 'month':
+            # Approximation
+            return (now - timedelta(days=val * 30)).strftime('%Y-%m-%d')
+        elif unit == 'year':
+            return (now - timedelta(days=val * 365)).strftime('%Y-%m-%d')
+            
+    # Try parsing as ISO date or other formats if possible
+    try:
+        # Handle formats like "28 Apr" or "28 April"
+        # If year is missing, assume current year
+        clean_str = relative_str
+        for fmt in ('%d %b %Y', '%d %B %Y', '%d %b', '%d %B', '%Y-%m-%dT%H:%M:%S.%fZ', '%Y-%m-%d'):
+            try:
+                dt = datetime.strptime(clean_str, fmt)
+                if '%Y' not in fmt:
+                    dt = dt.replace(year=now.year)
+                return dt.strftime('%Y-%m-%d')
+            except ValueError:
+                continue
+    except:
+        pass
+        
+    return relative_str
+
+
 def scrape_naukrigulf(url, max_pages=5):
     """Scrape job listings from Naukrigulf."""
     from scrapling.fetchers import StealthyFetcher
 
     all_jobs = []
+    consecutive_duplicates = 0
 
     for page_num in range(1, max_pages + 1):
         try:
@@ -69,31 +131,31 @@ def scrape_naukrigulf(url, max_pages=5):
 
                 # Extract experience and location correctly
                 spans = card.css('span:not([class])::text').getall()
-                job['experience'] = spans[0].strip() if len(spans) > 0 else ''
                 job['location'] = spans[1].strip() if len(spans) > 1 else ''
-
-                # Add link check
-                link_el = card.css('a.info-position')
-                if link_el:
-                    href = link_el[0].attrib.get('href', '')
-                    if href and not href.startswith('http'):
-                        href = 'https://www.naukrigulf.com' + href
-                    job['link'] = href
-                else:
-                    job['link'] = ''
+                job['experience'] = spans[0].strip() if len(spans) > 0 else ''
 
                 # Extract time posted
                 time_el = card.css('.time::text')
-                job['posted'] = time_el.get('').strip() if time_el else ''
+                job['posted'] = get_absolute_date(time_el.get('').strip()) if time_el else ''
                 
-                job['salary'] = ''
-                job['skills'] = ''
-
                 job['source'] = 'Naukrigulf'
                 job['page'] = page_num
 
                 if job['title']:  # Only add if we found a title
-                    all_jobs.append(job)
+                    # Save to database
+                    is_new = database.save_job(job)
+                    if is_new:
+                        all_jobs.append(job)
+                        consecutive_duplicates = 0
+                    else:
+                        consecutive_duplicates += 1
+                        print(f"Found duplicate job: {job['title']} at {job['company']}")
+                        if consecutive_duplicates >= 3:
+                            print("Reached previously scraped data. Stopping...")
+                            break
+                            
+            if consecutive_duplicates >= 3:
+                break
 
         except Exception as e:
             print(f"Error scraping Naukrigulf page {page_num}: {e}")
@@ -108,6 +170,7 @@ def scrape_linkedin(url, max_pages=5):
     from scrapling.fetchers import StealthyFetcher
 
     all_jobs = []
+    consecutive_duplicates = 0
 
     for page_num in range(max_pages):
         try:
@@ -168,35 +231,189 @@ def scrape_linkedin(url, max_pages=5):
                 )
                 job['location'] = loc_el.get('').strip() if loc_el else ''
 
-                # Link
-                link_el = card.css('a.base-card__full-link') or card.css('a[href*="linkedin.com/jobs"]') or card.css('a[href*="/jobs/"]')
-                if link_el:
-                    href = link_el[0].attrib.get('href', '')
-                    if href and not href.startswith('http'):
-                        href = 'https://www.linkedin.com' + href
-                    job['link'] = href.split('?')[0]  # Clean tracking params
-                else:
-                    job['link'] = ''
-
                 # Posted date
                 date_el = card.css('time::text') or card.css('.job-search-card__listdate::text') or card.css('[class*="date"]::text')
-                job['posted'] = date_el.get('').strip() if date_el else ''
-                if not job['posted']:
+                posted_raw = date_el.get('').strip() if date_el else ''
+                if not posted_raw:
                     time_el = card.css('time')
                     if time_el:
-                        job['posted'] = time_el[0].attrib.get('datetime', '')
+                        posted_raw = time_el[0].attrib.get('datetime', '')
+                
+                job['posted'] = get_absolute_date(posted_raw)
 
                 job['experience'] = ''
-                job['salary'] = ''
-                job['skills'] = ''
                 job['source'] = 'LinkedIn'
                 job['page'] = page_num + 1
 
                 if job['title']:
-                    all_jobs.append(job)
+                    is_new = database.save_job(job)
+                    if is_new:
+                        all_jobs.append(job)
+                        consecutive_duplicates = 0
+                    else:
+                        consecutive_duplicates += 1
+                        print(f"Found duplicate job: {job['title']} at {job['company']}")
+                        if consecutive_duplicates >= 3:
+                            print("Reached previously scraped data. Stopping...")
+                            break
+
+            if consecutive_duplicates >= 3:
+                break
 
         except Exception as e:
             print(f"Error scraping LinkedIn page {page_num + 1}: {e}")
+            traceback.print_exc()
+            break
+
+    return all_jobs
+
+
+def scrape_gulftalent(url, max_pages=5):
+    """Scrape job listings from GulfTalent."""
+    from scrapling.fetchers import StealthyFetcher
+
+    all_jobs = []
+    consecutive_duplicates = 0
+
+    for page_num in range(max_pages):
+        try:
+            pos = page_num * 25
+            if page_num == 0:
+                page_url = url
+            else:
+                if '?' in url:
+                    page_url = f"{url}&pos={pos}"
+                else:
+                    page_url = f"{url}?pos={pos}"
+
+            print(f"Fetching GulfTalent page {page_num + 1}: {page_url}")
+            page = StealthyFetcher.fetch(page_url, headless=True, network_idle=True)
+
+            if page is None:
+                break
+
+            job_rows = page.css('tr.content-visibility-auto')
+
+            if not job_rows:
+                break
+
+            for row in job_rows:
+                job = {}
+
+                # Title
+                title_el = row.css('h2.title a::text')
+                job['title'] = title_el.get('').strip() if title_el else ''
+
+                # Company
+                company_el = row.css('td:first-child a.text-muted::text')
+                job['company'] = company_el.get('').strip() if company_el else ''
+
+                # Location
+                loc_el = row.css('td.col-sm-6 span::text')
+                job['location'] = loc_el.get('').strip() if loc_el else ''
+
+                # Date
+                date_el = row.css('td.col-sm-4::text')
+                job['posted'] = get_absolute_date(date_el.get('').strip()) if date_el else ''
+
+                job['experience'] = ''
+                job['source'] = 'GulfTalent'
+                job['page'] = page_num + 1
+
+                if job['title']:
+                    is_new = database.save_job(job)
+                    if is_new:
+                        all_jobs.append(job)
+                        consecutive_duplicates = 0
+                    else:
+                        consecutive_duplicates += 1
+                        print(f"Found duplicate job: {job['title']} at {job['company']}")
+                        if consecutive_duplicates >= 3:
+                            print("Reached previously scraped data. Stopping...")
+                            break
+
+            if consecutive_duplicates >= 3:
+                break
+
+        except Exception as e:
+            print(f"Error scraping GulfTalent page {page_num + 1}: {e}")
+            traceback.print_exc()
+            break
+
+    return all_jobs
+
+
+def scrape_bayt(url, max_pages=5):
+    """Scrape job listings from Bayt.com."""
+    from scrapling.fetchers import StealthyFetcher
+
+    all_jobs = []
+    consecutive_duplicates = 0
+
+    for page_num in range(1, max_pages + 1):
+        try:
+            if page_num == 1:
+                page_url = url
+            else:
+                if '?' in url:
+                    page_url = f"{url}&page={page_num}"
+                else:
+                    page_url = f"{url}?page={page_num}"
+
+            print(f"Fetching Bayt.com page {page_num}: {page_url}")
+            page = StealthyFetcher.fetch(page_url, headless=True, network_idle=True)
+
+            if page is None:
+                break
+
+            job_cards = page.css('li.has-pointer-d')
+
+            if not job_cards:
+                break
+
+            for card in job_cards:
+                job = {}
+
+                # Title
+                title_el = card.css('h2 a::text')
+                job['title'] = title_el.get('').strip() if title_el else ''
+
+                # Company
+                company_el = card.css('.job-company-location-wrapper a.t-bold::text')
+                job['company'] = company_el.get('').strip() if company_el else ''
+
+                # Location
+                loc_el = card.css('.job-company-location-wrapper div.t-small a:first-child span::text')
+                job['location'] = loc_el.get('').strip() if loc_el else ''
+
+                # Date
+                date_el = card.css('.jb-date span::text')
+                job['posted'] = get_absolute_date(date_el.get('').strip()) if date_el else ''
+
+                # Experience
+                exp_el = card.css('.jb-label-careerlevel::text')
+                job['experience'] = exp_el.get('').strip() if exp_el else ''
+
+                job['source'] = 'Bayt'
+                job['page'] = page_num
+
+                if job['title'] and "Mobile App" not in job['title']:
+                    is_new = database.save_job(job)
+                    if is_new:
+                        all_jobs.append(job)
+                        consecutive_duplicates = 0
+                    else:
+                        consecutive_duplicates += 1
+                        print(f"Found duplicate job: {job['title']} at {job['company']}")
+                        if consecutive_duplicates >= 3:
+                            print("Reached previously scraped data. Stopping...")
+                            break
+
+            if consecutive_duplicates >= 3:
+                break
+
+        except Exception as e:
+            print(f"Error scraping Bayt.com page {page_num}: {e}")
             traceback.print_exc()
             break
 
@@ -264,7 +481,19 @@ def scrape_generic(url):
             data['source'] = 'Custom'
 
             if data.get('title'):
-                all_data.append(data)
+                # Enforce column order and remove unwanted fields
+                ordered_data = {
+                    'title': data.get('title', ''),
+                    'company': data.get('company', ''),
+                    'location': data.get('location', ''),
+                    'experience': data.get('experience', ''),
+                    'posted': get_absolute_date(data.get('posted', '')),
+                    'source': data.get('source', 'Custom')
+                }
+                
+                is_new = database.save_job(ordered_data)
+                if is_new:
+                    all_data.append(ordered_data)
 
     except Exception as e:
         print(f"Error scraping generic URL: {e}")
@@ -280,6 +509,10 @@ def detect_site(url):
         return 'naukrigulf'
     elif 'linkedin' in url_lower:
         return 'linkedin'
+    elif 'gulftalent' in url_lower:
+        return 'gulftalent'
+    elif 'bayt' in url_lower:
+        return 'bayt'
     else:
         return 'generic'
 
@@ -294,6 +527,10 @@ def run_scrape(job_id, url, max_pages, site_type):
             results = scrape_naukrigulf(url, max_pages)
         elif site_type == 'linkedin':
             results = scrape_linkedin(url, max_pages)
+        elif site_type == 'gulftalent':
+            results = scrape_gulftalent(url, max_pages)
+        elif site_type == 'bayt':
+            results = scrape_bayt(url, max_pages)
         else:
             results = scrape_generic(url)
 
@@ -341,7 +578,7 @@ def parse_relative_time(time_str):
 
 
 def generate_excel(data, filename):
-    """Generate a styled Excel file from scraped data."""
+    """Generate a styled Excel file from scraped data with specific column order."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Scraped Data"
@@ -352,12 +589,15 @@ def generate_excel(data, filename):
         wb.save(filepath)
         return filepath
 
-    # Get all unique keys
-    all_keys = []
-    for row in data:
-        for key in row.keys():
-            if key not in all_keys:
-                all_keys.append(key)
+    # Defined column order
+    column_order = ['title', 'company', 'location', 'experience', 'posted', 'source']
+    
+    # Filter keys to only those in our order that actually exist in the data
+    actual_keys = []
+    for key in column_order:
+        # Check if at least one row has this key
+        if any(key in row for row in data):
+            actual_keys.append(key)
 
     # Styling
     header_font = Font(name='Segoe UI', bold=True, color='FFFFFF', size=11)
@@ -374,7 +614,7 @@ def generate_excel(data, filename):
     alt_fill = PatternFill(start_color='F5F5FA', end_color='F5F5FA', fill_type='solid')
 
     # Write headers
-    for col, key in enumerate(all_keys, 1):
+    for col, key in enumerate(actual_keys, 1):
         cell = ws.cell(row=1, column=col, value=key.replace('_', ' ').title())
         cell.font = header_font
         cell.fill = header_fill
@@ -383,7 +623,7 @@ def generate_excel(data, filename):
 
     # Write data
     for row_idx, row_data in enumerate(data, 2):
-        for col_idx, key in enumerate(all_keys, 1):
+        for col_idx, key in enumerate(actual_keys, 1):
             value = row_data.get(key, '')
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
             cell.font = cell_font
@@ -393,7 +633,7 @@ def generate_excel(data, filename):
                 cell.fill = alt_fill
 
     # Auto-adjust column widths
-    for col_idx, key in enumerate(all_keys, 1):
+    for col_idx, key in enumerate(actual_keys, 1):
         max_length = len(key) + 4
         for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
             for cell in row:
@@ -514,6 +754,39 @@ def get_history():
             'completed_at': job['completed_at'],
         })
     return jsonify(jobs)
+
+@app.route('/api/database')
+def get_database_jobs():
+    """Get jobs stored in the database, optionally filtered by source."""
+    source = request.args.get('source')
+    jobs = database.get_all_jobs(source)
+    return jsonify(jobs)
+
+@app.route('/api/database/export')
+def export_database():
+    """Export database results to Excel."""
+    source = request.args.get('source')
+    jobs = database.get_all_jobs(source)
+    if not jobs:
+        return jsonify({'error': 'No data in database to export'}), 400
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    source_str = source.lower() if source else 'all'
+    filename = f"scraped_{source_str}_db_{timestamp}.xlsx"
+    filepath = generate_excel(jobs, filename)
+
+    return send_file(filepath, as_attachment=True, download_name=filename)
+
+@app.route('/api/database/clear', methods=['DELETE'])
+def clear_database():
+    """Clear jobs from the database, optionally by source."""
+    source = request.args.get('source')
+    success = database.clear_jobs(source)
+    if success:
+        return jsonify({'success': True})
+    return jsonify({'error': 'Failed to clear database'}), 500
+
+
 
 
 @app.route('/api/delete/<job_id>', methods=['DELETE'])

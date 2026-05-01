@@ -96,6 +96,7 @@ def scrape_naukrigulf(url, max_pages=5):
 
     all_jobs = []
     consecutive_duplicates = 0
+    seen_in_run = set()  # Track jobs seen in this scraping session
 
     for page_num in range(1, max_pages + 1):
         try:
@@ -103,11 +104,13 @@ def scrape_naukrigulf(url, max_pages=5):
             if page_num == 1:
                 page_url = url
             else:
-                # Handle both URL formats
+                # Handle both URL formats: SEO (-2, -3) and Search (?pageNo=)
                 if '?' in url:
-                    page_url = f"{url}&page={page_num}"
+                    page_url = f"{url}&pageNo={page_num}"
                 else:
-                    page_url = f"{url}?page={page_num}"
+                    # Clean URL style used for jobs-in-uae etc.
+                    base_url = url.rstrip('/')
+                    page_url = f"{base_url}-{page_num}"
 
             print(f"Fetching Naukrigulf page {page_num}: {page_url}")
             page = StealthyFetcher.fetch(page_url, headless=True, network_idle=True)
@@ -142,15 +145,27 @@ def scrape_naukrigulf(url, max_pages=5):
                 job['page'] = page_num
 
                 if job['title']:  # Only add if we found a title
-                    # Save to database
+                    # Create unique identifier for this job
+                    job_key = (job['title'].strip().lower(), job['company'].strip().lower(), job['location'].strip().lower())
+                    
+                    # Skip if we've already seen this job in current session (sponsored/repeated jobs)
+                    if job_key in seen_in_run:
+                        print(f"Skipping repeated job in session: {job['title']} at {job['company']}")
+                        continue
+                    
+                    # Add to session tracker
+                    seen_in_run.add(job_key)
+                    
+                    # Try to save to database
                     is_new = database.save_job(job)
                     if is_new:
                         all_jobs.append(job)
                         consecutive_duplicates = 0
                     else:
+                        # This is a duplicate from a previous scraping session
                         consecutive_duplicates += 1
-                        print(f"Found duplicate job: {job['title']} at {job['company']}")
-                        if consecutive_duplicates >= 3:
+                        print(f"Found duplicate from previous session: {job['title']} at {job['company']}")
+                        if consecutive_duplicates >= 3:  # Back to original threshold for actual duplicates
                             print("Reached previously scraped data. Stopping...")
                             break
                             
@@ -171,17 +186,28 @@ def scrape_linkedin(url, max_pages=5):
 
     all_jobs = []
     consecutive_duplicates = 0
+    seen_in_run = set()  # Track jobs seen in this scraping session
 
     for page_num in range(max_pages):
         try:
+            # LinkedIn redirects guests to Page 1 if using standard search URL
+            # Use guest API for stable pagination
             start = page_num * 25
-            if page_num == 0:
-                page_url = url
-            else:
-                if '?' in url:
-                    page_url = f"{url}&start={start}"
+            
+            if "linkedin.com/jobs/search" in url:
+                api_base = url.replace("linkedin.com/jobs/search", "linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search")
+                if '?' in api_base:
+                    page_url = f"{api_base}&start={start}"
                 else:
-                    page_url = f"{url}?start={start}"
+                    page_url = f"{api_base}?start={start}"
+            else:
+                if page_num == 0:
+                    page_url = url
+                else:
+                    if '?' in url:
+                        page_url = f"{url}&start={start}"
+                    else:
+                        page_url = f"{url}?start={start}"
 
             print(f"Fetching LinkedIn page {page_num + 1}: {page_url}")
             page = StealthyFetcher.fetch(page_url, headless=True, network_idle=True)
@@ -246,13 +272,26 @@ def scrape_linkedin(url, max_pages=5):
                 job['page'] = page_num + 1
 
                 if job['title']:
+                    # Create unique identifier for this job
+                    job_key = (job['title'].strip().lower(), job['company'].strip().lower(), job['location'].strip().lower())
+                    
+                    # Skip if we've already seen this job in current session
+                    if job_key in seen_in_run:
+                        print(f"Skipping repeated job in session: {job['title']} at {job['company']}")
+                        continue
+                    
+                    # Add to session tracker
+                    seen_in_run.add(job_key)
+                    
+                    # Try to save to database
                     is_new = database.save_job(job)
                     if is_new:
                         all_jobs.append(job)
                         consecutive_duplicates = 0
                     else:
+                        # This is a duplicate from a previous scraping session
                         consecutive_duplicates += 1
-                        print(f"Found duplicate job: {job['title']} at {job['company']}")
+                        print(f"Found duplicate from previous session: {job['title']} at {job['company']}")
                         if consecutive_duplicates >= 3:
                             print("Reached previously scraped data. Stopping...")
                             break
@@ -274,17 +313,17 @@ def scrape_gulftalent(url, max_pages=5):
 
     all_jobs = []
     consecutive_duplicates = 0
+    seen_in_run = set()  # Track jobs seen in this scraping session
 
     for page_num in range(max_pages):
         try:
-            pos = page_num * 25
+            # GulfTalent uses /2, /3 in the path for pagination
             if page_num == 0:
                 page_url = url
             else:
-                if '?' in url:
-                    page_url = f"{url}&pos={pos}"
-                else:
-                    page_url = f"{url}?pos={pos}"
+                # Clean URL trailing slash and append page number
+                base_url = url.rstrip('/')
+                page_url = f"{base_url}/{page_num + 1}"
 
             print(f"Fetching GulfTalent page {page_num + 1}: {page_url}")
             page = StealthyFetcher.fetch(page_url, headless=True, network_idle=True)
@@ -321,13 +360,26 @@ def scrape_gulftalent(url, max_pages=5):
                 job['page'] = page_num + 1
 
                 if job['title']:
+                    # Create unique identifier for this job
+                    job_key = (job['title'].strip().lower(), job['company'].strip().lower(), job['location'].strip().lower())
+                    
+                    # Skip if we've already seen this job in current session
+                    if job_key in seen_in_run:
+                        print(f"Skipping repeated job in session: {job['title']} at {job['company']}")
+                        continue
+                    
+                    # Add to session tracker
+                    seen_in_run.add(job_key)
+                    
+                    # Try to save to database
                     is_new = database.save_job(job)
                     if is_new:
                         all_jobs.append(job)
                         consecutive_duplicates = 0
                     else:
+                        # This is a duplicate from a previous scraping session
                         consecutive_duplicates += 1
-                        print(f"Found duplicate job: {job['title']} at {job['company']}")
+                        print(f"Found duplicate from previous session: {job['title']} at {job['company']}")
                         if consecutive_duplicates >= 3:
                             print("Reached previously scraped data. Stopping...")
                             break
@@ -349,6 +401,7 @@ def scrape_bayt(url, max_pages=5):
 
     all_jobs = []
     consecutive_duplicates = 0
+    seen_in_run = set()  # Track jobs seen in this scraping session
 
     for page_num in range(1, max_pages + 1):
         try:
@@ -398,13 +451,26 @@ def scrape_bayt(url, max_pages=5):
                 job['page'] = page_num
 
                 if job['title'] and "Mobile App" not in job['title']:
+                    # Create unique identifier for this job
+                    job_key = (job['title'].strip().lower(), job['company'].strip().lower(), job['location'].strip().lower())
+                    
+                    # Skip if we've already seen this job in current session
+                    if job_key in seen_in_run:
+                        print(f"Skipping repeated job in session: {job['title']} at {job['company']}")
+                        continue
+                    
+                    # Add to session tracker
+                    seen_in_run.add(job_key)
+                    
+                    # Try to save to database
                     is_new = database.save_job(job)
                     if is_new:
                         all_jobs.append(job)
                         consecutive_duplicates = 0
                     else:
+                        # This is a duplicate from a previous scraping session
                         consecutive_duplicates += 1
-                        print(f"Found duplicate job: {job['title']} at {job['company']}")
+                        print(f"Found duplicate from previous session: {job['title']} at {job['company']}")
                         if consecutive_duplicates >= 3:
                             print("Reached previously scraped data. Stopping...")
                             break

@@ -144,15 +144,15 @@ def parse_relative_time(time_str: str) -> float:
 # ─── Low-level page fetcher (runs in thread pool) ─────────────────────────────
 
 def _fetch_page(url: str, page_num: int):
-    """
-    Fetch one URL with StealthyFetcher.
-    Returns (page_num, page_object_or_None).
-    Isolated import so Playwright context is thread-local.
-    """
     from scrapling.fetchers import StealthyFetcher
     try:
         print(f"  → Fetching page {page_num}: {url}")
-        page = StealthyFetcher.fetch(url, headless=True, network_idle=True)
+        page = StealthyFetcher.fetch(
+            url,
+            headless=True,
+            network_idle=False,   # don't wait for all network requests to settle
+            block_images=True,    # cancel image downloads at browser level
+        )
         return page_num, page
     except Exception as e:
         print(f"  ✗ Page {page_num} failed: {e}")

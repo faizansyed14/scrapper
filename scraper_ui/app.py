@@ -44,7 +44,7 @@ scrape_jobs: dict = {}
 
 # How many pages to fetch in parallel.
 # 3 is safe — aggressive enough to be fast, gentle enough to avoid blocks.
-CONCURRENT_PAGES = 3
+CONCURRENT_PAGES = 1
 
 # Stop when this many consecutive pages contain ZERO new jobs.
 # 2 means: we need 2 full pages of 100% old data before we declare "done".
@@ -143,20 +143,26 @@ def parse_relative_time(time_str: str) -> float:
 
 # ─── Low-level page fetcher (runs in thread pool) ─────────────────────────────
 
-def _fetch_page(url: str, page_num: int):
+def _fetch_page(url: str, page_num: int, retries: int = 3):
     from scrapling.fetchers import StealthyFetcher
-    try:
-        print(f"  → Fetching page {page_num}: {url}")
-        page = StealthyFetcher.fetch(
-            url,
-            headless=True,
-            network_idle=False,   # don't wait for all network requests to settle
-            block_images=True,    # cancel image downloads at browser level
-        )
-        return page_num, page
-    except Exception as e:
-        print(f"  ✗ Page {page_num} failed: {e}")
-        return page_num, None
+    for attempt in range(1, retries + 1):
+        try:
+            print(f"  → Fetching page {page_num} (attempt {attempt}): {url}")
+            page = StealthyFetcher.fetch(
+                url,
+                headless=True,
+                network_idle=False,
+                block_images=True,
+                timeout=60000,        # 60 seconds instead of default 30
+            )
+            if page is not None:
+                return page_num, page
+            print(f"  ✗ Page {page_num} returned None, retrying...")
+        except Exception as e:
+            print(f"  ✗ Page {page_num} attempt {attempt} failed: {e}")
+            if attempt == retries:
+                return page_num, None
+    return page_num, None
 
 
 def _fetch_pages_concurrent(page_specs: list[tuple[int, str]]) -> dict:

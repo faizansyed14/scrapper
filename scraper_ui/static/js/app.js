@@ -10,6 +10,7 @@ let totalJobs = 0;
 let totalItems = 0;
 let isViewingDatabase = false;
 let currentDbSource = '';
+let currentDbCountry = '';  // e.g. 'UAE', 'KSA', 'Qatar', 'Kuwait', ''
 
 // ── DOM References ──────────────────────────────────────
 const urlInput = document.getElementById('url-input');
@@ -55,7 +56,7 @@ function setupEventListeners() {
 // ── Presets ──────────────────────────────────────────────
 function applyPreset(portal) {
     const country = document.getElementById('preset-country').value;
-    
+
     // Default config mapping
     const configs = {
         'naukrigulf': {
@@ -83,7 +84,7 @@ function applyPreset(portal) {
             'kuwait': 'https://www.bayt.com/en/kuwait/jobs/'
         }
     };
-    
+
     urlInput.value = configs[portal][country];
     setSiteType(portal);
 }
@@ -135,21 +136,20 @@ async function startScrape() {
         return;
     }
 
-    // Validate URL
-    try {
-        new URL(url);
-    } catch {
+    try { new URL(url); } catch {
         showToast('Please enter a valid URL', 'error');
         urlInput.focus();
         return;
     }
 
-    // Disable button, show spinner
+    // Read selected country from preset dropdown
+    const countryMap = { uae: 'UAE', ksa: 'KSA', qatar: 'Qatar', kuwait: 'Kuwait' };
+    const presetCountryVal = document.getElementById('preset-country').value;
+    const country = countryMap[presetCountryVal] || '';
+
     scrapeBtn.disabled = true;
     scrapeBtnText.textContent = 'Scraping...';
     scrapeBtnSpinner.style.display = 'inline-block';
-
-    // Show loading state in results
     showLoadingState();
     isViewingDatabase = false;
 
@@ -161,6 +161,7 @@ async function startScrape() {
                 url: url,
                 max_pages: parseInt(maxPagesInput.value) || 5,
                 site_type: siteSelect.value,
+                country: country,
             }),
         });
 
@@ -168,7 +169,7 @@ async function startScrape() {
 
         if (response.ok) {
             currentJobId = data.job_id;
-            showToast(`Scraping started (${data.site_type})...`, 'info');
+            showToast(`Scraping started (${data.site_type}${country ? ' · ' + country : ''})...`, 'info');
             startPolling(data.job_id);
         } else {
             showToast(data.error || 'Failed to start scraping', 'error');
@@ -208,12 +209,23 @@ function startPolling(jobId) {
                 } else {
                     showToast('No data found. Try a different URL or selector.', 'info');
                 }
+            } else if (data.status === 'cancelled') {
+                clearInterval(pollInterval);
+                pollInterval = null;
+                showErrorState('Scraping was cancelled by user.');
+                resetScrapeButton();
+                showToast('Scraping cancelled', 'info');
+                loadHistory();
             } else if (data.status === 'error') {
                 clearInterval(pollInterval);
                 pollInterval = null;
                 showErrorState(data.message);
                 resetScrapeButton();
                 showToast('Scraping failed: ' + data.message, 'error');
+            } else if (data.status === 'running') {
+                // Update loading message with progress from server
+                const msgEl = document.querySelector('.loading-overlay p:first-of-type');
+                if (msgEl) msgEl.textContent = data.message || 'Scraping in progress...';
             }
             // else still running - keep polling
         } catch (error) {
@@ -231,9 +243,9 @@ function renderResults(data) {
 
     // Defined column order
     const columnOrder = ['title', 'company', 'location', 'experience', 'posted'];
-    
+
     // Find which keys from our order exist in the data
-    const keys = columnOrder.filter(key => 
+    const keys = columnOrder.filter(key =>
         data.some(row => row.hasOwnProperty(key))
     );
 
@@ -279,14 +291,14 @@ function filterResults(data, query) {
 function extractTimeValue(str) {
     if (!str) return Infinity;
     str = String(str).toLowerCase();
-    
+
     if (str.includes('active') || str.includes('just now')) return 0;
 
     const match = str.match(/(\d+)\s*(min|hour|hr|day|week|month|year)s?/);
     if (match) {
         let val = parseInt(match[1], 10);
         let unit = match[2];
-        
+
         if (unit === 'min') return val;
         if (unit === 'hour' || unit === 'hr') return val * 60;
         if (unit === 'day') return val * 24 * 60;
@@ -294,7 +306,7 @@ function extractTimeValue(str) {
         if (unit === 'month') return val * 30 * 24 * 60;
         if (unit === 'year') return val * 365 * 24 * 60;
     }
-    
+
     let parsed = Date.parse(str);
     if (!isNaN(parsed)) {
         return (Date.now() - parsed) / 60000; // in minutes
@@ -305,17 +317,17 @@ function extractTimeValue(str) {
 
 function applyFiltersAndSort() {
     let data = filterResults(allResults, searchInput.value);
-    
+
     // Create a copy of the array before sorting to avoid mutating the original
     data = [...data];
-    
+
     const sortVal = sortSelect.value;
     if (sortVal === 'recent') {
         data.sort((a, b) => extractTimeValue(a.posted) - extractTimeValue(b.posted));
     } else if (sortVal === 'oldest') {
         data.sort((a, b) => extractTimeValue(b.posted) - extractTimeValue(a.posted));
     }
-    
+
     renderResults(data);
 }
 
@@ -325,8 +337,35 @@ function showLoadingState() {
     resultsBody.innerHTML = `
         <div class="loading-overlay">
             <div class="loading-ring"></div>
-            <p>Scraping in progress...</p>
-            <p style="font-size: 12px; color: var(--text-muted)">This may take a moment depending on the number of pages</p>
+            <p>Starting scraper...</p>
+            <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 20px;">This may take a moment depending on the number of pages</p>
+            <button class="btn btn-danger btn-sm" onclick="cancelScrape()">
+                🛑 Cancel Scraping
+            </button>
+        </div>
+    `;
+}
+
+async function cancelScrape() {
+    if (!currentJobId) return;
+    
+    showToast('Stopping scraper...', 'info');
+    try {
+        const response = await fetch(`/api/cancel/${currentJobId}`, { method: 'POST' });
+        if (response.ok) {
+            // startPolling will handle the 'cancelled' state
+        }
+    } catch (error) {
+        showToast('Cancel request failed', 'error');
+    }
+}
+
+function showDbLoadingState() {
+    resultToolbar.style.display = 'none';
+    resultsBody.innerHTML = `
+        <div class="loading-overlay">
+            <div class="loading-ring"></div>
+            <p>Fetching from database...</p>
         </div>
     `;
 }
@@ -353,13 +392,19 @@ function showErrorState(message) {
     `;
 }
 
-function showResultsToolbar(data) {
+function showResultsToolbar() {
     resultToolbar.style.display = 'flex';
     if (isViewingDatabase) {
-        document.getElementById('result-count').innerHTML = `Showing <strong>${data.length}</strong> jobs from <strong>Global Database ${currentDbSource ? '('+currentDbSource+')' : '(All Portals)'}</strong>`;
+        const label = currentDbSource ? currentDbSource : 'All Portals';
+        const loaded = allResults.length;
+        document.getElementById('result-count').innerHTML =
+            `Showing <strong>${loaded.toLocaleString()}</strong> of <strong>${dbTotalCount.toLocaleString()}</strong> jobs — <strong>${label}</strong>`;
         document.getElementById('delete-db-btn').style.display = 'inline-block';
     } else {
-        document.getElementById('result-count').innerHTML = `Showing <strong>${data.results.length}</strong> results from <strong>${data.site_type}</strong>`;
+        // called with scrape job data object
+        const d = arguments[0];
+        document.getElementById('result-count').innerHTML =
+            `Showing <strong>${d.results.length}</strong> results from <strong>${d.site_type}</strong>`;
         document.getElementById('delete-db-btn').style.display = 'none';
     }
 }
@@ -384,9 +429,14 @@ async function exportExcel() {
     showToast('Generating Excel file...', 'info');
 
     try {
-        let fetchUrl = `/api/export/${currentJobId}?sort=${sortSelect.value}`;
+        let fetchUrl;
         if (isViewingDatabase) {
-            fetchUrl = currentDbSource ? `/api/database/export?source=${currentDbSource}` : `/api/database/export`;
+            const params = new URLSearchParams();
+            if (currentDbSource) params.append('source', currentDbSource);
+            if (currentDbCountry) params.append('country', currentDbCountry);
+            fetchUrl = `/api/database/export?${params.toString()}`;
+        } else {
+            fetchUrl = `/api/export/${currentJobId}?sort=${sortSelect.value}`;
         }
         const response = await fetch(fetchUrl);
 
@@ -407,6 +457,60 @@ async function exportExcel() {
         }
     } catch (error) {
         showToast('Export failed: ' + error.message, 'error');
+    }
+}
+
+function handleImportExcel() {
+    // Open modal instead of triggering hidden input
+    document.getElementById('modal-import-country').value = currentDbCountry;
+    document.getElementById('modal-import-source').value = currentDbSource || 'Naukrigulf';
+    document.getElementById('import-modal').style.display = 'flex';
+}
+
+function closeImportModal() {
+    document.getElementById('import-modal').style.display = 'none';
+}
+
+async function submitModalImport() {
+    const fileInput = document.getElementById('modal-import-file');
+    const country = document.getElementById('modal-import-country').value;
+    const source = document.getElementById('modal-import-source').value;
+    const file = fileInput.files[0];
+
+    if (!file) {
+        showToast('Please select a file', 'error');
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('default_source', source);
+    formData.append('default_country', country);
+
+    showToast('Importing Excel data...', 'info');
+    closeImportModal();
+
+    try {
+        const response = await fetch('/api/database/import', {
+            method: 'POST',
+            body: formData
+        });
+        const data = await response.json();
+
+        if (response.ok) {
+            showToast(`Import Success: ${data.inserted} new jobs added!`, 'success');
+            loadDbStats();
+            // If the import matches current filters, refresh view
+            if (currentDbSource === source || !currentDbSource) {
+                viewDatabase(currentDbSource, currentDbCountry);
+            }
+        } else {
+            showToast(data.error || 'Import failed', 'error');
+        }
+    } catch (error) {
+        showToast('Import failed: ' + error.message, 'error');
+    } finally {
+        fileInput.value = ''; // clear for next use
     }
 }
 
@@ -496,34 +600,55 @@ async function deleteJob(jobId) {
 }
 
 // ── Database ────────────────────────────────────────────
+let dbCurrentPage = 1;
+let dbHasMore = false;
+let dbTotalCount = 0;
+
 async function loadDbStats() {
     try {
-        const response = await fetch('/api/database');
+        const response = await fetch('/api/database?limit=1');
         const data = await response.json();
-        statDb.textContent = data.length;
+        statDb.textContent = data.total.toLocaleString();
     } catch (error) {
         console.error('Failed to load DB stats', error);
     }
 }
 
+// 2-level tab selectors
+function selectDbCountry(country) {
+    currentDbCountry = country;
+    document.querySelectorAll('.db-country-tab').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.country === country);
+    });
+    viewDatabase(currentDbSource, currentDbCountry);
+}
+
+function selectDbPortal(source) {
+    currentDbSource = source;
+    document.querySelectorAll('.db-portal-tab').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.source === source);
+    });
+    viewDatabase(currentDbSource, currentDbCountry);
+}
+
 function showView(view, source = '') {
     // Update nav active states
     document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
-    
+
     const dbControls = document.getElementById('db-portal-tabs');
     const topControls = document.getElementById('top-controls');
     const resultsPanelHeader = document.getElementById('results-panel-header');
-    
+
     if (view === 'database') {
         isViewingDatabase = true;
         currentDbSource = source;
         dbControls.style.display = 'flex';
         if (topControls) topControls.style.display = 'none';
         resultsPanelHeader.style.display = 'none'; // hide the regular header because we have tabs
-        
+
         // Highlight correct nav link
         document.querySelector('.nav-dropdown .nav-link').classList.add('active');
-        
+
         viewDatabase(source);
     } else {
         isViewingDatabase = false;
@@ -531,10 +656,10 @@ function showView(view, source = '') {
         dbControls.style.display = 'none';
         if (topControls) topControls.style.display = 'grid';
         resultsPanelHeader.style.display = 'flex';
-        
+
         // Highlight nav link
         document.querySelector('.nav-link[onclick="showView(\'scraper\')"]').classList.add('active');
-        
+
         // If we have a current scrape job, view it, else show empty
         if (currentJobId && currentJobId !== 'database') {
             viewJob(currentJobId);
@@ -544,66 +669,135 @@ function showView(view, source = '') {
     }
 }
 
-async function viewDatabase(source = '') {
-    showLoadingState();
+async function viewDatabase(source = '', country = '') {
+    currentDbSource = source;
+    currentDbCountry = country;
+    dbCurrentPage = 1;
+    dbHasMore = false;
+    allResults = [];
+
+    showDbLoadingState();
     try {
-        currentDbSource = source;
-        const fetchUrl = source ? `/api/database?source=${source}` : '/api/database';
-        const response = await fetch(fetchUrl);
-        const data = await response.json();
-        
         isViewingDatabase = true;
         currentJobId = 'database';
-        allResults = data;
-        
-        // If no source filter, update global stats
-        if (!source) {
-            statDb.textContent = data.length;
-        }
 
-        // Update DB Tabs Active State
-        document.querySelectorAll('.db-tab-btn').forEach(btn => {
-            btn.classList.remove('active');
-            if (btn.textContent.includes(source || 'All Portals')) {
-                btn.classList.add('active');
-            }
-        });
+        const url = new URL('/api/database', window.location.origin);
+        if (source) url.searchParams.append('source', source);
+        if (country) url.searchParams.append('country', country);
+        url.searchParams.append('page', 1);
+        url.searchParams.append('limit', 100);
+
+        const response = await fetch(url);
+        const data = await response.json();
+
+        dbTotalCount = data.total;
+        dbHasMore = data.has_more;
+        dbCurrentPage = 1;
+        allResults = data.jobs;
+
+        statDb.textContent = data.total.toLocaleString();
+
+        // Sync tab active states
+        document.querySelectorAll('.db-country-tab').forEach(btn =>
+            btn.classList.toggle('active', btn.dataset.country === country));
+        document.querySelectorAll('.db-portal-tab').forEach(btn =>
+            btn.classList.toggle('active', btn.dataset.source === source));
 
         searchInput.value = '';
-        sortSelect.value = 'recent';
-        applyFiltersAndSort();
-        showResultsToolbar(data);
+        sortSelect.value = 'default';
+        renderResults(allResults);
+        appendLoadMoreButton();
+        showResultsToolbar();
 
-        // Deselect history items
-        document.querySelectorAll('.history-item').forEach(item => {
-            item.classList.remove('active');
-        });
-        
-        showToast(source ? `Loaded ${source} Database` : 'Loaded Global Database', 'success');
+        document.querySelectorAll('.history-item').forEach(item => item.classList.remove('active'));
+
+        const label = [country, source].filter(Boolean).join(' · ') || 'All';
+        showToast(`Loaded ${label} (${data.total.toLocaleString()} jobs)`, 'success');
     } catch (error) {
         showErrorState('Failed to load database');
         showToast('Error loading database', 'error');
     }
 }
 
-async function deleteDatabase() {
-    const confirmMsg = currentDbSource ? `Are you sure you want to delete ALL ${currentDbSource} jobs from the database?` : `Are you sure you want to completely clear the entire database? This cannot be undone.`;
-    
-    if (!confirm(confirmMsg)) return;
+async function loadMoreDbJobs() {
+    if (!dbHasMore) return;
+    dbCurrentPage++;
+
+    const btn = document.getElementById('load-more-btn');
+    if (btn) btn.textContent = 'Loading...';
 
     try {
-        const fetchUrl = currentDbSource ? `/api/database/clear?source=${currentDbSource}` : '/api/database/clear';
-        const response = await fetch(fetchUrl, { method: 'DELETE' });
-        
+        const url = new URL('/api/database', window.location.origin);
+        if (currentDbSource) url.searchParams.append('source', currentDbSource);
+        if (currentDbCountry) url.searchParams.append('country', currentDbCountry);
+        url.searchParams.append('page', dbCurrentPage);
+        url.searchParams.append('limit', 100);
+
+        const response = await fetch(url);
+        const data = await response.json();
+
+        dbHasMore = data.has_more;
+        allResults = allResults.concat(data.jobs);
+
+        const tbody = resultsBody.querySelector('tbody');
+        const startIdx = allResults.length - data.jobs.length;
+        const columnOrder = ['title', 'company', 'location', 'experience', 'posted'];
+        const keys = columnOrder.filter(k => allResults.some(r => r.hasOwnProperty(k)));
+
+        data.jobs.forEach((row, i) => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<td class="row-number">${startIdx + i + 1}</td>` +
+                keys.map(k => `<td title="${escapeHtml(row[k] || '')}">${escapeHtml(truncate(row[k] || '', 60))}</td>`).join('');
+            if (tbody) tbody.appendChild(tr);
+        });
+
+        appendLoadMoreButton();
+        showResultsToolbar();
+    } catch (e) {
+        showToast('Failed to load more', 'error');
+    }
+}
+
+function appendLoadMoreButton() {
+    const existing = document.getElementById('load-more-btn');
+    if (existing) existing.remove();
+    if (!dbHasMore) return;
+
+    const loaded = Math.min(dbCurrentPage * 100, dbTotalCount);
+    const btn = document.createElement('button');
+    btn.id = 'load-more-btn';
+    btn.className = 'btn btn-secondary';
+    btn.style = 'margin: 16px auto; display: block; min-width: 200px;';
+    btn.textContent = `Load More (${loaded.toLocaleString()} / ${dbTotalCount.toLocaleString()})`;
+    btn.onclick = loadMoreDbJobs;
+    resultsBody.appendChild(btn);
+}
+
+async function deleteDatabase() {
+    const parts = [currentDbCountry, currentDbSource].filter(Boolean);
+    const label = parts.join(' · ') || 'entire';
+
+    /**
+     * WARNING: This will permanently delete all matching jobs from the database.
+     * This cannot be undone.
+     */
+    if (!confirm(`Delete ALL ${label} jobs from database? Cannot be undone.`)) return;
+
+    try {
+        const params = new URLSearchParams();
+        if (currentDbSource) params.append('source', currentDbSource);
+        if (currentDbCountry) params.append('country', currentDbCountry);
+        const response = await fetch(`/api/database/clear?${params.toString()}`, { method: 'DELETE' });
+
         if (response.ok) {
-            showToast('Database deleted successfully', 'success');
+            showToast('Deleted successfully', 'success');
             loadDbStats();
-            viewDatabase(currentDbSource);
+            viewDatabase(currentDbSource, currentDbCountry);
         } else {
-            showToast('Failed to delete database', 'error');
+            showToast('Failed to delete', 'error');
         }
     } catch (error) {
-        showToast('Failed to delete database', 'error');
+        showToast('Failed to delete', 'error');
     }
 }
 

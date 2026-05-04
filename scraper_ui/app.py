@@ -44,7 +44,7 @@ scrape_jobs: dict = {}
 
 # How many pages to fetch in parallel.
 # 3 is safe — aggressive enough to be fast, gentle enough to avoid blocks.
-CONCURRENT_PAGES = 1
+CONCURRENT_PAGES = 3
 
 # Stop when this many consecutive pages contain ZERO new jobs.
 # 2 means: we need 2 full pages of 100% old data before we declare "done".
@@ -102,13 +102,14 @@ def get_absolute_date(relative_str: str) -> str:
     return relative_str
 
 
-def make_fingerprint(title: str, company: str, location: str, source: str) -> str:
+def make_fingerprint(title: str, company: str, location: str, source: str, country: str = '') -> str:
     """Must match database._make_fingerprint exactly."""
     return (
         f"{(title or '').lower().strip()}"
         f"|{(company or '').lower().strip()}"
         f"|{(location or '').lower().strip()}"
         f"|{(source or '').lower().strip()}"
+        f"|{(country or '').lower().strip()}"
     )
 
 
@@ -143,26 +144,20 @@ def parse_relative_time(time_str: str) -> float:
 
 # ─── Low-level page fetcher (runs in thread pool) ─────────────────────────────
 
-def _fetch_page(url: str, page_num: int, retries: int = 3):
+def _fetch_page(url: str, page_num: int):
     from scrapling.fetchers import StealthyFetcher
-    for attempt in range(1, retries + 1):
-        try:
-            print(f"  → Fetching page {page_num} (attempt {attempt}): {url}")
-            page = StealthyFetcher.fetch(
-                url,
-                headless=True,
-                network_idle=False,
-                block_images=True,
-                timeout=60000,        # 60 seconds instead of default 30
-            )
-            if page is not None:
-                return page_num, page
-            print(f"  ✗ Page {page_num} returned None, retrying...")
-        except Exception as e:
-            print(f"  ✗ Page {page_num} attempt {attempt} failed: {e}")
-            if attempt == retries:
-                return page_num, None
-    return page_num, None
+    try:
+        print(f"  → Fetching page {page_num}: {url}")
+        page = StealthyFetcher.fetch(
+            url,
+            headless=True,
+            network_idle=False,   # don't wait for all network requests to settle
+            block_images=True,    # cancel image downloads at browser level
+        )
+        return page_num, page
+    except Exception as e:
+        print(f"  ✗ Page {page_num} failed: {e}")
+        return page_num, None
 
 
 def _fetch_pages_concurrent(page_specs: list[tuple[int, str]]) -> dict:
@@ -226,9 +221,13 @@ def _parse_linkedin_page(page, page_num: int) -> list[dict]:
             card.css('[class*="title"]::text')
         )
         company_el = (
+            card.css('.base-search-card__subtitle a::text') or
             card.css('.base-search-card__subtitle::text') or
+            card.css('a.hidden-nested-link::text') or
             card.css('.job-search-card__subtitle-link::text') or
+            card.css('.base-search-card__subtitle [data-tracking-control-name*="subtitle"]::text') or
             card.css('h4 a::text') or
+            card.css('h4::text') or
             card.css('[class*="company"]::text')
         )
         loc_el = (
@@ -263,16 +262,51 @@ def _parse_linkedin_page(page, page_num: int) -> list[dict]:
 
 def _parse_gulftalent_page(page, page_num: int) -> list[dict]:
     jobs = []
-    rows = page.css('tr.content-visibility-auto')
+    # GulfTalent uses table rows for job results
+    rows = page.css('tr.content-visibility-auto') or page.css('.job-result-row') or page.css('table tr')
     for row in rows:
-        title_el   = row.css('h2.title a::text')
-        company_el = row.css('td:first-child a.text-muted::text')
-        loc_el     = row.css('td.col-sm-6 span::text')
-        date_el    = row.css('td.col-sm-4::text')
+        title_el = (
+            row.css('h2.title a::text') or 
+            row.css('.job-title a::text') or 
+            row.css('a.title::text') or 
+            row.css('a.text-title::text')
+        )
+        title = (title_el.get('') if title_el else '').strip()
+        if not title:
+            continue
+        
+        # Company is usually a link with class text-muted or contains /companies/ in href
+        company_el = (
+            row.css('a.text-muted::text') or 
+            row.css('a[href*="/companies/"]::text') or
+            row.css('.company-name::text')
+        )
+        company = (company_el.get('') if company_el else '').strip()
+        
+        # Robust fallback: check all links in the row and take the first one that isn't the title
+        if not company:
+            links = row.css('a::text').getall()
+            for l in links:
+                l = l.strip()
+                if l and l != title and len(l) > 1:
+                    company = l
+                    break
+
+        loc_el = (
+            row.css('td.col-sm-6 span::text') or 
+            row.css('.location::text') or 
+            row.css('a.text-regular::text') or
+            row.css('td:nth-child(2) ::text')
+        )
+        date_el = (
+            row.css('td.col-sm-4::text') or 
+            row.css('.date-posted::text') or
+            row.css('td:last-child ::text')
+        )
 
         job = {
-            'title':      (title_el.get('') if title_el else '').strip(),
-            'company':    (company_el.get('') if company_el else '').strip(),
+            'title':      title,
+            'company':    company,
             'location':   (loc_el.get('') if loc_el else '').strip(),
             'experience': '',
             'posted':     get_absolute_date((date_el.get('') if date_el else '').strip()),
@@ -360,24 +394,11 @@ def _get_parser(site: str):
     return parsers.get(site)
 
 
-def _scrape_site(url: str, site: str, max_pages: int) -> list[dict]:
+def _scrape_site(url: str, site: str, max_pages: int, country: str = '', job_id: str = None) -> list[dict]:
     """
     Generic concurrent scraping engine used by all site scrapers.
-
-    Algorithm
-    ---------
-    1. Load all existing DB fingerprints into a set (single query).
-    2. Fetch pages in batches of CONCURRENT_PAGES in parallel.
-    3. For each page (processed in order):
-       a. Extract all job cards.
-       b. Skip intra-session duplicates (sponsored/pinned jobs that repeat every page).
-       c. Check each new job against DB fingerprints (O(1)).
-       d. Accumulate: new_this_page vs old_this_page counts.
-    4. After processing all pages in a batch, decide:
-       - If a page had ANY new jobs → reset consecutive-dupe-page counter.
-       - If a page had ZERO new jobs → increment counter.
-       - If counter >= STOP_AFTER_DUPE_PAGES → stop fetching more pages.
-    5. Batch-insert all new jobs from the page into DB at once.
+    country — e.g. 'UAE', 'KSA', 'Qatar', 'Kuwait' — stored in DB for per-country filtering.
+    job_id — used for progress reporting and cancellation checks.
     """
     source_name = {
         'naukrigulf': 'Naukrigulf',
@@ -391,16 +412,15 @@ def _scrape_site(url: str, site: str, max_pages: int) -> list[dict]:
         print(f"[!] No parser for site: {site}")
         return []
 
-    # Step 1: Pre-load fingerprints
-    db_fingerprints: set = database.load_fingerprints(source_name)
+    # Step 1: Pre-load fingerprints scoped to this source+country
+    db_fingerprints: set = database.load_fingerprints(source_name, country or None)
 
     all_new_jobs: list[dict] = []
-    seen_in_run: set         = set()   # intra-session dedup (handles sponsored jobs)
+    seen_in_run: set         = set()
     consecutive_dupe_pages   = 0
     page_num                 = 1
 
     while page_num <= max_pages:
-        # Build batch of (page_num, url) pairs
         batch: list[tuple[int, str]] = []
         for i in range(CONCURRENT_PAGES):
             pn = page_num + i
@@ -411,14 +431,21 @@ def _scrape_site(url: str, site: str, max_pages: int) -> list[dict]:
         if not batch:
             break
 
-        print(f"\n[{source_name}] Fetching pages {batch[0][0]}–{batch[-1][0]} concurrently...")
+        print(f"\n[{source_name}/{country or 'all'}] Fetching pages {batch[0][0]}–{batch[-1][0]}...")
 
-        # Step 2: Concurrent fetch
         fetched = _fetch_pages_concurrent(batch)
 
-        # Step 3 & 4: Process in page order
         should_stop = False
         for pn, page_url in batch:
+            # Check for cancellation
+            if scrape_jobs.get(job_id, {}).get('cancel_requested'):
+                print(f"  ⚠ Cancellation requested for job {job_id} at page {pn}.")
+                scrape_jobs[job_id]['status'] = 'cancelled'
+                scrape_jobs[job_id]['message'] = 'Scraping cancelled by user'
+                should_stop = True
+                break
+
+            scrape_jobs[job_id]['message'] = f'Processing page {pn} of {max_pages}...'
             page = fetched.get(pn)
             if page is None:
                 print(f"  ✗ Page {pn} returned None — stopping.")
@@ -436,19 +463,20 @@ def _scrape_site(url: str, site: str, max_pages: int) -> list[dict]:
             dupe_count = 0
 
             for job in raw_jobs:
-                # Intra-session key: catches sponsored/pinned jobs that repeat on every page
                 session_key = (
                     job['title'].lower().strip(),
                     job['company'].lower().strip(),
                     job['location'].lower().strip(),
                 )
                 if session_key in seen_in_run:
-                    # Sponsored/pinned — skip silently, do NOT count toward dupe logic
                     continue
                 seen_in_run.add(session_key)
 
+                # Stamp country onto the job dict
+                job['country'] = country
+
                 fp = make_fingerprint(
-                    job['title'], job['company'], job['location'], job['source']
+                    job['title'], job['company'], job['location'], job['source'], country
                 )
 
                 if fp in db_fingerprints:
@@ -456,60 +484,59 @@ def _scrape_site(url: str, site: str, max_pages: int) -> list[dict]:
                 else:
                     new_count += 1
                     new_this_page.append(job)
-                    db_fingerprints.add(fp)  # update local cache so intra-batch dupes are caught
+                    db_fingerprints.add(fp)
 
             print(
                 f"  ✓ Page {pn}: {new_count} new | {dupe_count} already-in-db "
                 f"| dupe-page streak: {consecutive_dupe_pages}"
             )
 
-            # Step 5: Batch insert new jobs from this page
             if new_this_page:
                 database.save_jobs_batch(new_this_page)
                 all_new_jobs.extend(new_this_page)
-                consecutive_dupe_pages = 0          # reset — we found something new
+                consecutive_dupe_pages = 0
             else:
                 if dupe_count > 0:
-                    # Full page of old data
                     consecutive_dupe_pages += 1
                     print(
                         f"  ⚠ Page {pn} is 100% old data. "
                         f"Streak: {consecutive_dupe_pages}/{STOP_AFTER_DUPE_PAGES}"
                     )
                     if consecutive_dupe_pages >= STOP_AFTER_DUPE_PAGES:
-                        print(
-                            f"  ⛔ {STOP_AFTER_DUPE_PAGES} consecutive pages of old data — "
-                            f"reached previously scraped territory. Stopping."
-                        )
+                        print(f"  ⛔ {STOP_AFTER_DUPE_PAGES} consecutive pages of old data — stopping.")
                         should_stop = True
                         break
-                # else: page was 0 new AND 0 old (e.g. all sponsored) — don't penalise
+                else:
+                    # 0 new AND 0 old unique jobs — usually means end of results or empty redirect
+                    print(f"  ⛔ Page {pn} has 0 unique jobs — stopping.")
+                    should_stop = True
+                    break
 
         if should_stop:
             break
 
         page_num += CONCURRENT_PAGES
 
-    print(f"\n[{source_name}] Done. {len(all_new_jobs)} new jobs found.")
+    print(f"\n[{source_name}/{country or 'all'}] Done. {len(all_new_jobs)} new jobs found.")
     return all_new_jobs
 
 
 # ─── Public scraper functions ─────────────────────────────────────────────────
 
-def scrape_naukrigulf(url: str, max_pages: int = 5) -> list[dict]:
-    return _scrape_site(url, 'naukrigulf', max_pages)
+def scrape_naukrigulf(url: str, max_pages: int = 5, country: str = '', job_id: str = None) -> list[dict]:
+    return _scrape_site(url, 'naukrigulf', max_pages, country, job_id)
 
 
-def scrape_linkedin(url: str, max_pages: int = 5) -> list[dict]:
-    return _scrape_site(url, 'linkedin', max_pages)
+def scrape_linkedin(url: str, max_pages: int = 5, country: str = '', job_id: str = None) -> list[dict]:
+    return _scrape_site(url, 'linkedin', max_pages, country, job_id)
 
 
-def scrape_gulftalent(url: str, max_pages: int = 5) -> list[dict]:
-    return _scrape_site(url, 'gulftalent', max_pages)
+def scrape_gulftalent(url: str, max_pages: int = 5, country: str = '', job_id: str = None) -> list[dict]:
+    return _scrape_site(url, 'gulftalent', max_pages, country, job_id)
 
 
-def scrape_bayt(url: str, max_pages: int = 5) -> list[dict]:
-    return _scrape_site(url, 'bayt', max_pages)
+def scrape_bayt(url: str, max_pages: int = 5, country: str = '', job_id: str = None) -> list[dict]:
+    return _scrape_site(url, 'bayt', max_pages, country, job_id)
 
 
 def scrape_generic(url: str) -> list[dict]:
@@ -601,11 +628,11 @@ def detect_site(url: str) -> str:
 
 # ─── Background runner ────────────────────────────────────────────────────────
 
-def run_scrape(job_id: str, url: str, max_pages: int, site_type: str):
+def run_scrape(job_id: str, url: str, max_pages: int, site_type: str, country: str = ''):
     """Run scraping in a background thread and update scrape_jobs[job_id]."""
     try:
         scrape_jobs[job_id]['status']  = 'running'
-        scrape_jobs[job_id]['message'] = f'Scraping {site_type}...'
+        scrape_jobs[job_id]['message'] = f'Starting {site_type} scrape...'
 
         dispatch = {
             'naukrigulf': scrape_naukrigulf,
@@ -618,7 +645,7 @@ def run_scrape(job_id: str, url: str, max_pages: int, site_type: str):
         if site_type == 'generic':
             results = fn(url)
         else:
-            results = fn(url, max_pages)
+            results = fn(url, max_pages, country, job_id)
 
         scrape_jobs[job_id]['results']      = results
         scrape_jobs[job_id]['status']       = 'completed'
@@ -703,6 +730,7 @@ def start_scrape():
     data      = request.json
     url       = data.get('url', '').strip()
     max_pages = int(data.get('max_pages', 5))
+    country   = data.get('country', '').strip()   # e.g. 'UAE', 'KSA', 'Qatar', 'Kuwait'
 
     if not url:
         return jsonify({'error': 'URL is required'}), 400
@@ -716,6 +744,7 @@ def start_scrape():
         'id':           job_id,
         'url':          url,
         'site_type':    site_type,
+        'country':      country,
         'status':       'queued',
         'message':      'Starting...',
         'results':      [],
@@ -724,11 +753,19 @@ def start_scrape():
         'max_pages':    max_pages,
     }
 
-    thread = threading.Thread(target=run_scrape, args=(job_id, url, max_pages, site_type))
+    thread = threading.Thread(target=run_scrape, args=(job_id, url, max_pages, site_type, country))
     thread.daemon = True
     thread.start()
 
-    return jsonify({'job_id': job_id, 'site_type': site_type})
+    return jsonify({'job_id': job_id, 'site_type': site_type, 'country': country})
+
+
+@app.route('/api/cancel/<job_id>', methods=['POST'])
+def cancel_scrape(job_id):
+    if job_id in scrape_jobs:
+        scrape_jobs[job_id]['cancel_requested'] = True
+        return jsonify({'status': 'cancel_requested'})
+    return jsonify({'error': 'Job not found'}), 404
 
 
 @app.route('/api/status/<job_id>')
@@ -791,31 +828,94 @@ def get_history():
 
 @app.route('/api/database')
 def get_database_jobs():
-    source = request.args.get('source')
-    return jsonify(database.get_all_jobs(source))
+    source  = request.args.get('source') or None
+    country = request.args.get('country') or None
+    page    = int(request.args.get('page', 1))
+    limit   = int(request.args.get('limit', 100))
+    total   = database.get_job_count(source, country)
+    jobs    = database.get_jobs(source, country, page, limit)
+    return jsonify({
+        'jobs':     jobs,
+        'total':    total,
+        'page':     page,
+        'limit':    limit,
+        'has_more': (page * limit) < total,
+    })
 
 
 @app.route('/api/database/export')
 def export_database():
-    source = request.args.get('source')
-    jobs   = database.get_all_jobs(source)
+    source  = request.args.get('source') or None
+    country = request.args.get('country') or None
+    jobs    = database.get_all_jobs(source, country)
     if not jobs:
         return jsonify({'error': 'No data in database to export'}), 400
 
     timestamp  = datetime.now().strftime('%Y%m%d_%H%M%S')
-    source_str = source.lower() if source else 'all'
-    filename   = f"scraped_{source_str}_db_{timestamp}.xlsx"
+    parts = [p for p in [source, country] if p]
+    label = ('_'.join(parts)).lower() if parts else 'all'
+    filename   = f"scraped_{label}_db_{timestamp}.xlsx"
     filepath   = generate_excel(jobs, filename)
     return send_file(filepath, as_attachment=True, download_name=filename)
 
 
 @app.route('/api/database/clear', methods=['DELETE'])
 def clear_database():
-    source  = request.args.get('source')
-    success = database.clear_jobs(source)
+    source  = request.args.get('source') or None
+    country = request.args.get('country') or None
+    success = database.clear_jobs(source, country)
     if success:
         return jsonify({'success': True})
     return jsonify({'error': 'Failed to clear database'}), 500
+
+
+@app.route('/api/database/import', methods=['POST'])
+def import_database():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    
+    file = request.files['file']
+    default_source  = request.form.get('default_source', 'Imported')
+    default_country = request.form.get('default_country', '')
+
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(file, data_only=True)
+        ws = wb.active
+
+        # Map headers to internal keys
+        headers = [str(cell.value).lower().replace(' ', '_') if cell.value else None for cell in ws[1]]
+        
+        jobs_to_import = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not any(row): continue # skip empty rows
+            
+            job = {}
+            for i, val in enumerate(row):
+                if i < len(headers) and headers[i]:
+                    job[headers[i]] = str(val) if val is not None else ""
+            
+            # Ensure required fields
+            job['title']      = job.get('title') or job.get('job_title') or ""
+            job['company']    = job.get('company') or job.get('company_name') or ""
+            job['source']     = job.get('source') or default_source
+            job['country']    = job.get('country') or default_country
+            job['location']   = job.get('location') or ""
+            job['experience'] = job.get('experience') or ""
+            job['posted']     = job.get('posted') or ""
+
+            if job['title'] and job['company']:
+                jobs_to_import.append(job)
+
+        if not jobs_to_import:
+            return jsonify({'error': 'No valid job records found in Excel'}), 400
+
+        inserted = database.save_jobs_batch(jobs_to_import)
+        return jsonify({'success': True, 'inserted': inserted, 'total': len(jobs_to_import)})
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': f'Import failed: {str(e)}'}), 500
 
 
 @app.route('/api/delete/<job_id>', methods=['DELETE'])

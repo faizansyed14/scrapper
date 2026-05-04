@@ -62,8 +62,9 @@ def init_db():
                 experience TEXT,
                 posted    TEXT,
                 source    TEXT NOT NULL,
+                country   TEXT DEFAULT '',
                 scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(title, company, location, source)
+                UNIQUE(title, company, location, source, country)
             )
         ''')
     else:
@@ -76,10 +77,17 @@ def init_db():
                 experience TEXT,
                 posted     TEXT,
                 source     TEXT NOT NULL,
+                country    TEXT DEFAULT '',
                 scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(title, company, location, source)
+                UNIQUE(title, company, location, source, country)
             )
         ''')
+        # Auto-migrate: add country column if missing (for existing DBs)
+        try:
+            cursor.execute("ALTER TABLE jobs ADD COLUMN country TEXT DEFAULT ''")
+            print('[DB] Migrated: added country column')
+        except Exception:
+            pass  # Column already exists
 
     conn.commit()
     conn.close()
@@ -87,55 +95,42 @@ def init_db():
 
 # ─── Fingerprint pre-loader (the key to smart dedup) ─────────────────────────
 
-def load_fingerprints(source: str | None = None) -> set:
+def load_fingerprints(source: str | None = None, country: str | None = None) -> set:
     """
-    Return a set of lowercase fingerprint strings for every job already in the DB.
-
-    Fingerprint format:  "{title}|{company}|{location}|{source}"  (all lowercase/stripped)
-
-    Call this ONCE at the start of a scrape run, then use set-lookups (O(1)) instead
-    of hitting the database for every single job card — 200x faster at scale.
+    Return a set of lowercase fingerprint strings for every job in the DB.
+    Fingerprint: "{title}|{company}|{location}|{source}|{country}" (lowercase/stripped)
     """
     conn = get_db_connection()
     cursor = conn.cursor()
+    pg = is_postgres()
+    where, params = _build_where(source, country, pg)
 
-    if is_postgres():
-        if source:
-            cursor.execute(
-                'SELECT title, company, location, source FROM jobs WHERE source ILIKE %s',
-                (source,)
-            )
-        else:
-            cursor.execute('SELECT title, company, location, source FROM jobs')
-    else:
-        if source:
-            cursor.execute(
-                'SELECT title, company, location, source FROM jobs WHERE source LIKE ?',
-                (source,)
-            )
-        else:
-            cursor.execute('SELECT title, company, location, source FROM jobs')
+    cursor.execute(
+        f'SELECT title, company, location, source, country FROM jobs {where}',
+        params
+    )
 
     fingerprints = set()
     for row in cursor.fetchall():
         row = dict(row)
         fp = _make_fingerprint(
-            row['title'], row['company'], row['location'], row['source']
+            row['title'], row['company'], row['location'], row['source'], row.get('country', '')
         )
         fingerprints.add(fp)
 
     conn.close()
-    print(f"[DB] Loaded {len(fingerprints)} existing fingerprints for source={source or 'all'}")
+    print(f"[DB] Loaded {len(fingerprints)} fingerprints (source={source or 'all'}, country={country or 'all'})")
     return fingerprints
 
 
-def _make_fingerprint(title: str, company: str, location: str, source: str) -> str:
+def _make_fingerprint(title: str, company: str, location: str, source: str, country: str = '') -> str:
     """Canonical fingerprint — lowercase, stripped, pipe-separated."""
     return (
         f"{(title or '').lower().strip()}"
         f"|{(company or '').lower().strip()}"
         f"|{(location or '').lower().strip()}"
         f"|{(source or '').lower().strip()}"
+        f"|{(country or '').lower().strip()}"
     )
 
 
@@ -154,23 +149,24 @@ def save_job(job: dict) -> bool:
     experience = job.get('experience', '')
     posted     = job.get('posted', '')
     source     = job.get('source', '')
+    country    = job.get('country', '')
 
     try:
         if is_postgres():
             cursor.execute('''
-                INSERT INTO jobs (title, company, location, experience, posted, source)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (title, company, location, source) DO NOTHING
+                INSERT INTO jobs (title, company, location, experience, posted, source, country)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (title, company, location, source, country) DO NOTHING
                 RETURNING id
-            ''', (title, company, location, experience, posted, source))
+            ''', (title, company, location, experience, posted, source, country))
             inserted = cursor.fetchone() is not None
             conn.commit()
             return inserted
         else:
             cursor.execute('''
-                INSERT OR IGNORE INTO jobs (title, company, location, experience, posted, source)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (title, company, location, experience, posted, source))
+                INSERT OR IGNORE INTO jobs (title, company, location, experience, posted, source, country)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (title, company, location, experience, posted, source, country))
             conn.commit()
             return cursor.rowcount > 0
 
@@ -207,16 +203,16 @@ def save_jobs_batch(jobs: list[dict]) -> int:
                     j.get('experience', ''),
                     j.get('posted', ''),
                     j.get('source', ''),
+                    j.get('country', ''),
                 )
                 for j in jobs
             ]
-            # execute_values returns the RETURNING rows
             execute_values(
                 cursor,
                 '''
-                INSERT INTO jobs (title, company, location, experience, posted, source)
+                INSERT INTO jobs (title, company, location, experience, posted, source, country)
                 VALUES %s
-                ON CONFLICT (title, company, location, source) DO NOTHING
+                ON CONFLICT (title, company, location, source, country) DO NOTHING
                 ''',
                 rows,
             )
@@ -230,14 +226,15 @@ def save_jobs_batch(jobs: list[dict]) -> int:
                     j.get('experience', ''),
                     j.get('posted', ''),
                     j.get('source', ''),
+                    j.get('country', ''),
                 )
                 for j in jobs
             ]
             cursor.executemany(
                 '''
                 INSERT OR IGNORE INTO jobs
-                    (title, company, location, experience, posted, source)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (title, company, location, experience, posted, source, country)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ''',
                 rows,
             )
@@ -276,49 +273,82 @@ def job_exists(title, company, location, source) -> bool:
     return exists
 
 
-def get_all_jobs(source=None) -> list[dict]:
-    """Fetch all saved jobs, optionally filtered by source."""
-    conn = get_db_connection()
+def _build_where(source, country, pg=False):
+    """Build WHERE clause and params for source+country filters."""
+    clauses, params = [], []
+    ph = '%s' if pg else '?'
+    if source:
+        clauses.append(f'source {"ILIKE" if pg else "LIKE"} {ph}')
+        params.append(source)
+    if country:
+        clauses.append(f'country {"ILIKE" if pg else "LIKE"} {ph}')
+        params.append(country)
+    where = ('WHERE ' + ' AND '.join(clauses)) if clauses else ''
+    return where, params
 
-    if is_postgres():
+
+def get_job_count(source=None, country=None) -> int:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    pg = is_postgres()
+    where, params = _build_where(source, country, pg)
+    cursor.execute(f'SELECT COUNT(*) FROM jobs {where}', params)
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+
+def get_jobs(source=None, country=None, page=1, limit=100) -> list[dict]:
+    """Fetch one page of jobs ordered newest first."""
+    conn = get_db_connection()
+    offset = (page - 1) * limit
+    pg = is_postgres()
+    where, params = _build_where(source, country, pg)
+
+    if pg:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        if source:
-            cursor.execute(
-                'SELECT * FROM jobs WHERE source ILIKE %s ORDER BY scraped_at DESC',
-                (source,)
-            )
-        else:
-            cursor.execute('SELECT * FROM jobs ORDER BY scraped_at DESC')
+        cursor.execute(
+            f'SELECT * FROM jobs {where} ORDER BY scraped_at DESC LIMIT %s OFFSET %s',
+            params + [limit, offset]
+        )
     else:
         cursor = conn.cursor()
-        if source:
-            cursor.execute(
-                'SELECT * FROM jobs WHERE source LIKE ? ORDER BY scraped_at DESC',
-                (source,)
-            )
-        else:
-            cursor.execute('SELECT * FROM jobs ORDER BY scraped_at DESC')
+        cursor.execute(
+            f'SELECT * FROM jobs {where} ORDER BY scraped_at DESC LIMIT ? OFFSET ?',
+            params + [limit, offset]
+        )
 
     jobs = [dict(row) for row in cursor.fetchall()]
     conn.close()
     return jobs
 
 
-def clear_jobs(source=None) -> bool:
-    """Delete jobs from the DB, optionally filtered by source."""
+def get_all_jobs(source=None, country=None) -> list[dict]:
+    """Fetch ALL jobs — used only for Excel export."""
+    conn = get_db_connection()
+    pg = is_postgres()
+    where, params = _build_where(source, country, pg)
+
+    if pg:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(f'SELECT * FROM jobs {where} ORDER BY scraped_at DESC', params)
+    else:
+        cursor = conn.cursor()
+        cursor.execute(f'SELECT * FROM jobs {where} ORDER BY scraped_at DESC', params)
+
+    jobs = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return jobs
+
+
+def clear_jobs(source=None, country=None) -> bool:
+    """Delete jobs filtered by source and/or country."""
     conn = get_db_connection()
     cursor = conn.cursor()
+    pg = is_postgres()
+    where, params = _build_where(source, country, pg)
     try:
-        if is_postgres():
-            if source:
-                cursor.execute('DELETE FROM jobs WHERE source ILIKE %s', (source,))
-            else:
-                cursor.execute('DELETE FROM jobs')
-        else:
-            if source:
-                cursor.execute('DELETE FROM jobs WHERE source LIKE ?', (source,))
-            else:
-                cursor.execute('DELETE FROM jobs')
+        cursor.execute(f'DELETE FROM jobs {where}', params)
         conn.commit()
         return True
     except Exception as e:

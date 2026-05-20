@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import Flask, render_template, request, jsonify, send_file
 import database
+import classifier
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -639,6 +640,15 @@ def _scrape_site(url: str, site: str, max_pages: int, country: str = '', job_id:
                     job['title'], job['company'], job['location'], job['source'], country
                 )
 
+                # ICT Classification & Date Normalization
+                is_ict, ict_cat = classifier.classify_job(job['title'])
+                norm_date, precision = normalize_posted_date(job.get('posted', ''))
+                
+                job['_is_ict'] = is_ict
+                job['ict_category'] = ict_cat
+                job['posted'] = norm_date
+                job['date_precision'] = precision
+
                 if fp in db_fingerprints:
                     dupe_count += 1
                 else:
@@ -838,7 +848,7 @@ def generate_excel(data: list[dict], filename: str) -> str:
         wb.save(filepath)
         return filepath
 
-    column_order = ['title', 'company', 'location', 'experience', 'posted', 'source']
+    column_order = ['title', 'company', 'location', 'experience', 'posted', 'source', 'is_ict', 'ict_category']
     actual_keys  = [k for k in column_order if any(k in row for row in data)]
 
     header_font      = Font(name='Segoe UI', bold=True, color='FFFFFF', size=11)
@@ -863,7 +873,16 @@ def generate_excel(data: list[dict], filename: str) -> str:
 
     for row_idx, row_data in enumerate(data, 2):
         for col_idx, key in enumerate(actual_keys, 1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=row_data.get(key, ''))
+            val = row_data.get(key, '')
+            # Handle key variations (_is_ict vs is_ict)
+            if key == 'is_ict' and val == '':
+                val = row_data.get('_is_ict', '')
+            
+            # Convert boolean/int to Yes/No for better readability in Excel
+            if key == 'is_ict':
+                val = "Yes" if val in [True, 1, "1", "True"] else "No"
+
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
             cell.font      = cell_font
             cell.alignment = cell_alignment
             cell.border    = thin_border
@@ -923,7 +942,7 @@ def generate_multi_excel(data: list[dict], filename: str) -> str:
     default_sheet = wb.active
     wb.remove(default_sheet)
 
-    column_order = ['title', 'company', 'location', 'experience', 'posted']
+    column_order = ['title', 'company', 'location', 'experience', 'posted', 'is_ict', 'ict_category']
     
     for (source, country), group_rows in grouped_data.items():
         # Sheet names can only be 31 characters max
@@ -949,7 +968,16 @@ def generate_multi_excel(data: list[dict], filename: str) -> str:
         # Write Rows
         for row_idx, row_data in enumerate(group_rows, 2):
             for col_idx, key in enumerate(actual_keys, 1):
-                cell = ws.cell(row=row_idx, column=col_idx, value=row_data.get(key, ''))
+                val = row_data.get(key, '')
+                # Handle key variations (_is_ict vs is_ict)
+                if key == 'is_ict' and val == '':
+                    val = row_data.get('_is_ict', '')
+                
+                # Convert boolean/int to Yes/No
+                if key == 'is_ict':
+                    val = "Yes" if val in [True, 1, "1", "True"] else "No"
+
+                cell = ws.cell(row=row_idx, column=col_idx, value=val)
                 cell.font      = cell_font
                 cell.alignment = cell_alignment
                 cell.border    = thin_border
@@ -1170,6 +1198,198 @@ def get_database_jobs():
     })
 
 
+@app.route('/api/stats')
+def get_stats():
+    source = request.args.get('source')
+    country = request.args.get('country')
+    count = database.get_job_count(source, country)
+    
+    # Get all jobs for analysis (limited to a reasonable number for speed)
+    # For a full dashboard, we might want a specific DB query for stats.
+    # But for now, let's just get the count of ICT vs non-ICT.
+    conn = database.get_db_connection()
+    cursor = conn.cursor()
+    where, params = database._build_where(source, country, database.is_postgres())
+    
+    ict_query = f'SELECT COUNT(*) FROM jobs {where} {"AND" if "WHERE" in where else "WHERE"} is_ict = {"TRUE" if database.is_postgres() else "1"}'
+    cursor.execute(ict_query, params)
+    ict_count = cursor.fetchone()[0]
+    
+    cat_query = f'SELECT ict_category, COUNT(*) FROM jobs {where} {"AND" if "WHERE" in where else "WHERE"} is_ict = {"TRUE" if database.is_postgres() else "1"} GROUP BY ict_category'
+    cursor.execute(cat_query, params)
+    categories = {row[0]: row[1] for row in cursor.fetchall() if row[0]}
+
+    # Count imprecise dates (30+ days)
+    imprecise_query = f"SELECT COUNT(*) FROM jobs {where} {'AND' if 'WHERE' in where else 'WHERE'} date_precision = 'imprecise_30_plus'"
+    cursor.execute(imprecise_query, params)
+    imprecise_count = cursor.fetchone()[0]
+    
+    conn.close()
+    
+    return jsonify({
+        "total": count,
+        "ict_count": ict_count,
+        "ict_rate": round((ict_count / count * 100), 2) if count > 0 else 0,
+        "imprecise_count": imprecise_count,
+        "categories": categories
+    })
+
+
+import re
+from datetime import datetime, timedelta
+
+def normalize_posted_date(date_str):
+    """
+    Normalizes relative dates and returns (normalized_date, precision).
+    30+ days ago is flagged as imprecise and returned as None for trend analysis.
+    """
+    if not date_str:
+        return datetime.now().strftime('%Y-%m-%d'), 'precise'
+    
+    date_str = str(date_str).lower().strip()
+    now = datetime.now()
+    
+    # "30+ days ago" or "1 month ago" -> IMPRECISE
+    if '30+' in date_str or 'month' in date_str:
+        return None, 'imprecise_30_plus'
+    
+    # "X days ago"
+    day_match = re.search(r'(\d+)\s*day', date_str)
+    if day_match:
+        return (now - timedelta(days=int(day_match.group(1)))).strftime('%Y-%m-%d'), 'precise'
+    
+    # "X hours ago" or "X mins ago"
+    time_match = re.search(r'(\d+)\s*(hour|min|hr)', date_str)
+    if time_match or 'just' in date_str or 'active' in date_str:
+        return now.strftime('%Y-%m-%d'), 'precise'
+    
+    # "X weeks ago"
+    week_match = re.search(r'(\d+)\s*week', date_str)
+    if week_match:
+        return (now - timedelta(weeks=int(week_match.group(1)))).strftime('%Y-%m-%d'), 'precise'
+
+    # If it's already a YYYY-MM-DD string, preserve it
+    try:
+        if len(date_str) == 10 and date_str[4] == '-' and date_str[7] == '-':
+            datetime.strptime(date_str, '%Y-%m-%d')
+            return date_str, 'precise'
+    except:
+        pass
+
+    return now.strftime('%Y-%m-%d'), 'precise'
+
+
+@app.route('/api/analysis')
+def get_analysis():
+    source = request.args.get('source')
+    country = request.args.get('country')
+    period = request.args.get('period', 'week') # day, week, month
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+    
+    conn = database.get_db_connection()
+    cursor = conn.cursor()
+    where, params = database._build_where(source, country, database.is_postgres())
+
+    # Add Date range to where clause
+    if start_date:
+        prefix = " AND " if "WHERE" in where else " WHERE "
+        where += f"{prefix}posted >= %s" if database.is_postgres() else f"{prefix}posted >= ?"
+        params.append(start_date)
+    if end_date:
+        prefix = " AND " if "WHERE" in where else " WHERE "
+        where += f"{prefix}posted <= %s" if database.is_postgres() else f"{prefix}posted <= ?"
+        params.append(end_date)
+    
+    # Category distribution
+    cat_query = f'SELECT ict_category, COUNT(*) as count FROM jobs {where} {"AND" if "WHERE" in where else "WHERE"} is_ict = {"TRUE" if database.is_postgres() else "1"} GROUP BY ict_category ORDER BY count DESC'
+    cursor.execute(cat_query, params)
+    category_data = [{"category": row[0], "count": row[1]} for row in cursor.fetchall() if row[0]]
+    
+    # Top employers for ICT
+    emp_query = f'SELECT company, COUNT(*) as count FROM jobs {where} {"AND" if "WHERE" in where else "WHERE"} is_ict = {"TRUE" if database.is_postgres() else "1"} GROUP BY company ORDER BY count DESC LIMIT 10'
+    cursor.execute(emp_query, params)
+    employer_data = [{"company": row[0], "count": row[1]} for row in cursor.fetchall()]
+    
+    # Portal distribution
+    portal_query = f'SELECT source, COUNT(*) as count FROM jobs {where} GROUP BY source'
+    cursor.execute(portal_query, params)
+    portal_data = [{"portal": row[0], "count": row[1]} for row in cursor.fetchall()]
+    
+    # ICT Rate by Source
+    rate_query = f'SELECT source, COUNT(*) as total, SUM(CASE WHEN is_ict = {"TRUE" if database.is_postgres() else "1"} THEN 1 ELSE 0 END) as ict FROM jobs {where} GROUP BY source'
+    try:
+        cursor.execute("ALTER TABLE jobs ADD COLUMN is_ict BOOLEAN DEFAULT 0")
+        cursor.execute("ALTER TABLE jobs ADD COLUMN ict_category TEXT")
+        cursor.execute("ALTER TABLE jobs ADD COLUMN date_precision TEXT DEFAULT 'precise'")
+        conn.commit()
+    except:
+        pass 
+    cursor.execute(rate_query, params)
+    source_rates = []
+    for row in cursor.fetchall():
+        total = row[1]
+        ict = row[2]
+        source_rates.append({
+            "source": row[0],
+            "total": total,
+            "ict": ict,
+            "rate": round((ict / total * 100), 2) if total > 0 else 0
+        })
+
+    # Country distribution for ICT
+    country_query = f'SELECT country, COUNT(*) as count FROM jobs {where} {"AND" if "WHERE" in where else "WHERE"} is_ict = {"TRUE" if database.is_postgres() else "1"} GROUP BY country ORDER BY count DESC'
+    cursor.execute(country_query, params)
+    country_data = [{"country": row[0] or "Unknown", "count": row[1]} for row in cursor.fetchall()]
+
+    # Weekly/Daily/Monthly trend
+    if database.is_postgres():
+        trunc_map = {'day': 'day', 'week': 'week', 'month': 'month'}
+        trunc = trunc_map.get(period, 'week')
+        trend_query = f'''
+            SELECT date_trunc('{trunc}', posted::date) as time_unit, COUNT(*) 
+            FROM jobs 
+            {where} {"AND" if "WHERE" in where else "WHERE"} is_ict = TRUE 
+            AND posted IS NOT NULL AND posted != ''
+            GROUP BY time_unit ORDER BY time_unit ASC
+        '''
+    else:
+        # SQLite period grouping
+        if period == 'day':
+            group_fmt = "date(posted)"
+        elif period == 'month':
+            group_fmt = "strftime('%Y-%m', posted)"
+        else: # week
+            group_fmt = "date(posted, 'weekday 0', '-6 days')"
+            
+        trend_query = f'''
+            SELECT {group_fmt} as time_unit, COUNT(*) 
+            FROM jobs 
+            {where} {"AND" if "WHERE" in where else "WHERE"} is_ict = 1 
+            AND posted IS NOT NULL AND posted != ''
+            AND date_precision = 'precise'
+            GROUP BY time_unit ORDER BY time_unit ASC
+        '''
+    
+    try:
+        cursor.execute(trend_query, params)
+        trend_data = [{"label": row[0], "count": row[1]} for row in cursor.fetchall()]
+    except Exception as e:
+        print(f"Trend Error: {e}")
+        trend_data = []
+
+    conn.close()
+    
+    return jsonify({
+        "category_distribution": category_data,
+        "top_employers": employer_data,
+        "portal_distribution": portal_data,
+        "source_rates": source_rates,
+        "country_distribution": country_data,
+        "weekly_trend": trend_data
+    })
+
+
 @app.route('/api/database/export')
 def export_database():
     source  = request.args.get('source') or None
@@ -1223,37 +1443,70 @@ def import_database():
     try:
         from openpyxl import load_workbook
         wb = load_workbook(file, data_only=True)
-        ws = wb.active
-
-        # Map headers to internal keys
-        headers = [str(cell.value).lower().replace(' ', '_') if cell.value else None for cell in ws[1]]
         
-        jobs_to_import = []
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if not any(row): continue # skip empty rows
+        total_imported = 0
+        total_found = 0
+
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            # Infer country/portal from sheet name
+            sheet_parts = sheet_name.replace(' ', '_').split('_')
+            inferred_country = default_country
+            inferred_source = default_source
             
-            job = {}
-            for i, val in enumerate(row):
-                if i < len(headers) and headers[i]:
-                    job[headers[i]] = str(val) if val is not None else ""
+            known_countries = ['UAE', 'KSA', 'Qatar', 'Kuwait']
+            known_portals = ['LinkedIn', 'Naukrigulf', 'GulfTalent', 'Bayt']
+
+            for p in sheet_parts:
+                if p.upper() in [c.upper() for c in known_countries]:
+                    inferred_country = p
+                if p.lower() in [s.lower() for s in known_portals]:
+                    inferred_source = p
+
+            # Map headers
+            headers = [str(cell.value).lower().replace(' ', '_') if cell.value else None for cell in ws[1]]
             
-            # Ensure required fields
-            job['title']      = job.get('title') or job.get('job_title') or ""
-            job['company']    = job.get('company') or job.get('company_name') or ""
-            job['source']     = job.get('source') or default_source
-            job['country']    = job.get('country') or default_country
-            job['location']   = job.get('location') or ""
-            job['experience'] = job.get('experience') or ""
-            job['posted']     = job.get('posted') or ""
+            jobs_to_import = []
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if not any(row): continue
+                
+                job = {}
+                for i, val in enumerate(row):
+                    if i < len(headers) and headers[i]:
+                        job[headers[i]] = str(val) if val is not None else ""
+                
+                # Normalize keys with more aliases
+                title = job.get('title') or job.get('job_title') or job.get('job_name') or job.get('position') or ""
+                company = job.get('company') or job.get('company_name') or job.get('employer') or ""
+                if not title or not company: continue
 
-            if job['title'] and job['company']:
-                jobs_to_import.append(job)
+                # ICT Classification
+                is_ict, ict_cat = classifier.classify_job(title)
+                
+                # Date Normalization
+                posted_str = job.get('posted') or job.get('posted_date') or job.get('date') or job.get('date_posted') or ""
+                norm_date, precision = normalize_posted_date(posted_str)
 
-        if not jobs_to_import:
-            return jsonify({'error': 'No valid job records found in Excel'}), 400
+                job_data = {
+                    'title': title,
+                    'company': company,
+                    'location': job.get('location') or "",
+                    'experience': job.get('experience') or "",
+                    'posted': norm_date,
+                    'source': job.get('source') or inferred_source,
+                    'country': job.get('country') or inferred_country,
+                    'is_ict': is_ict,
+                    'ict_category': ict_cat,
+                    'date_precision': precision
+                }
+                jobs_to_import.append(job_data)
 
-        inserted = database.save_jobs_batch(jobs_to_import)
-        return jsonify({'success': True, 'inserted': inserted, 'total': len(jobs_to_import)})
+            if jobs_to_import:
+                inserted = database.save_jobs_batch(jobs_to_import)
+                total_imported += inserted
+                total_found += len(jobs_to_import)
+
+        return jsonify({'success': True, 'inserted': total_imported, 'total': total_found})
 
     except Exception as e:
         traceback.print_exc()

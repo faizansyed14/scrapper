@@ -65,6 +65,9 @@ def init_db():
                 country   TEXT DEFAULT '',
                 scrape_id TEXT DEFAULT '',
                 scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_ict    BOOLEAN DEFAULT FALSE,
+                ict_category TEXT,
+                date_precision TEXT DEFAULT 'precise',
                 UNIQUE(title, company, location, source, country)
             )
         ''')
@@ -81,21 +84,19 @@ def init_db():
                 country    TEXT DEFAULT '',
                 scrape_id  TEXT DEFAULT '',
                 scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_ict     BOOLEAN DEFAULT 0,
+                ict_category TEXT,
+                date_precision TEXT DEFAULT 'precise',
                 UNIQUE(title, company, location, source, country)
             )
         ''')
-        # Auto-migrate: add columns if missing (for existing DBs)
-        try:
-            cursor.execute("ALTER TABLE jobs ADD COLUMN country TEXT DEFAULT ''")
-            print('[DB] Migrated: added country column')
-        except Exception:
-            pass
-            
-        try:
-            cursor.execute("ALTER TABLE jobs ADD COLUMN scrape_id TEXT DEFAULT ''")
-            print('[DB] Migrated: added scrape_id column')
-        except Exception:
-            pass
+        # Auto-migrate: add columns if missing
+        for col, col_type in [('country', 'TEXT DEFAULT \'\''), ('scrape_id', 'TEXT DEFAULT \'\''), ('is_ict', 'BOOLEAN DEFAULT 0'), ('ict_category', 'TEXT'), ('date_precision', 'TEXT DEFAULT \'precise\'')]:
+            try:
+                cursor.execute(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}")
+                print(f'[DB] Migrated: added {col} column')
+            except Exception:
+                pass
 
     conn.commit()
     conn.close()
@@ -159,23 +160,25 @@ def save_job(job: dict) -> bool:
     source     = job.get('source', '')
     country    = job.get('country', '')
     scrape_id  = job.get('scrape_id', '')
+    is_ict     = 1 if job.get('_is_ict') else 0
+    ict_category = job.get('ict_category', '')
 
     try:
         if is_postgres():
             cursor.execute('''
-                INSERT INTO jobs (title, company, location, experience, posted, source, country, scrape_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO jobs (title, company, location, experience, posted, source, country, scrape_id, is_ict, ict_category)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (title, company, location, source, country) DO NOTHING
                 RETURNING id
-            ''', (title, company, location, experience, posted, source, country, scrape_id))
+            ''', (title, company, location, experience, posted, source, country, scrape_id, is_ict, ict_category))
             inserted = cursor.fetchone() is not None
             conn.commit()
             return inserted
         else:
             cursor.execute('''
-                INSERT OR IGNORE INTO jobs (title, company, location, experience, posted, source, country, scrape_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (title, company, location, experience, posted, source, country, scrape_id))
+                INSERT OR IGNORE INTO jobs (title, company, location, experience, posted, source, country, scrape_id, is_ict, ict_category)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (title, company, location, experience, posted, source, country, scrape_id, is_ict, ict_category))
             conn.commit()
             return cursor.rowcount > 0
 
@@ -214,15 +217,23 @@ def save_jobs_batch(jobs: list[dict]) -> int:
                     j.get('source', ''),
                     j.get('country', ''),
                     j.get('scrape_id', ''),
+                    1 if j.get('is_ict') or j.get('_is_ict') else 0,
+                    j.get('ict_category', ''),
+                    j.get('date_precision', 'precise'),
                 )
                 for j in jobs
             ]
             execute_values(
                 cursor,
                 '''
-                INSERT INTO jobs (title, company, location, experience, posted, source, country, scrape_id)
+                INSERT INTO jobs (title, company, location, experience, posted, source, country, scrape_id, is_ict, ict_category, date_precision)
                 VALUES %s
-                ON CONFLICT (title, company, location, source, country) DO NOTHING
+                ON CONFLICT (title, company, location, source, country) 
+                DO UPDATE SET 
+                    is_ict = EXCLUDED.is_ict,
+                    ict_category = EXCLUDED.ict_category,
+                    posted = EXCLUDED.posted,
+                    date_precision = EXCLUDED.date_precision
                 ''',
                 rows,
             )
@@ -238,14 +249,17 @@ def save_jobs_batch(jobs: list[dict]) -> int:
                     j.get('source', ''),
                     j.get('country', ''),
                     j.get('scrape_id', ''),
+                    1 if j.get('is_ict') or j.get('_is_ict') else 0,
+                    j.get('ict_category', ''),
+                    j.get('date_precision', 'precise'),
                 )
                 for j in jobs
             ]
             cursor.executemany(
                 '''
-                INSERT OR IGNORE INTO jobs
-                    (title, company, location, experience, posted, source, country, scrape_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO jobs
+                    (title, company, location, experience, posted, source, country, scrape_id, is_ict, ict_category, date_precision)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 rows,
             )

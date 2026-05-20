@@ -10,6 +10,8 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <link rel="icon"
         href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🕷️</text></svg>">
+    <!-- Chart.js for premium visualizations -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 
 <body>
@@ -24,7 +26,8 @@
                 <span>Scrapling UI</span>
             </div>
             <div class="nav-links">
-                <a href="#" class="nav-link active" onclick="showView('scraper')">Scraper</a>
+                <a href="#" class="nav-link active" id="nav-scraper" onclick="showView('scraper')">Scraper</a>
+                <a href="#" class="nav-link" id="nav-analysis" onclick="showView('analysis')">Analysis</a>
                 <div class="nav-dropdown">
                     <a href="#" class="nav-link" onclick="showView('database', '')">Database ▾</a>
                     <div class="nav-dropdown-content">
@@ -274,6 +277,127 @@
                         <h3>No Data Yet</h3>
                         <p>Enter a URL and hit "Start Scraping" to extract data. Results will appear here in a table.
                         </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ─── Analysis View ─── -->
+            <div id="analysis-view" class="analysis-view" style="display: none; padding: 20px;">
+                <div class="analysis-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+                    <div class="panel-title" style="font-size: 20px;">
+                        <div class="icon" style="width: 40px; height: 40px; background: var(--bg-input); border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; font-size: 20px;">📈</div>
+                        ICT Job Market Analysis
+                    </div>
+                    <div class="analysis-filters" style="display: flex; gap: 12px; align-items: center;">
+                        <div style="display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 13px;">
+                            <span>From:</span>
+                            <input type="date" id="analysis-start" class="form-select" style="width: 140px; height: 32px; padding: 0 8px;" onchange="loadAnalysis()">
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 13px;">
+                            <span>To:</span>
+                            <input type="date" id="analysis-end" class="form-select" style="width: 140px; height: 32px; padding: 0 8px;" onchange="loadAnalysis()">
+                        </div>
+                        <select id="analysis-country" class="form-select" onchange="loadAnalysis()" style="width: 150px; height: 32px; padding: 0 8px;">
+                            <option value="">All Countries</option>
+                            <option value="UAE">🇦🇪 UAE</option>
+                            <option value="KSA">🇸🇦 KSA</option>
+                            <option value="Qatar">🇶🇦 Qatar</option>
+                            <option value="Kuwait">🇰🇼 Kuwait</option>
+                        </select>
+                        <select id="analysis-portal" class="form-select" onchange="loadAnalysis()" style="width: 150px; height: 32px; padding: 0 8px;">
+                            <option value="">All Portals</option>
+                            <option value="Naukrigulf">Naukrigulf</option>
+                            <option value="LinkedIn">LinkedIn</option>
+                            <option value="GulfTalent">GulfTalent</option>
+                            <option value="Bayt">Bayt</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="analysis-grid" style="display: flex; flex-direction: column; gap: 24px;">
+                    <!-- Stat Cards -->
+                    <div class="analysis-stats-row" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px;">
+                        <div class="panel" style="padding: 24px; display: flex; align-items: center; gap: 20px;">
+                            <div class="icon" style="font-size: 32px; background: var(--bg-primary); padding: 15px; border-radius: 12px; width: 64px; height: 64px; display: flex; align-items: center; justify-content: center;">📊</div>
+                            <div>
+                                <div class="stat-label" style="font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;">Total Scraped</div>
+                                <div class="stat-value" id="analysis-total-jobs" style="font-size: 28px; font-weight: 800; color: var(--text-primary);">0</div>
+                                <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+                                    ⚠️ <span id="analysis-imprecise-count">0</span> imprecise (30+ days)
+                                </div>
+                            </div>
+                        </div>
+                        <div class="panel" style="padding: 24px; display: flex; align-items: center; gap: 20px;">
+                            <div class="icon" style="font-size: 32px; background: rgba(108, 92, 231, 0.1); color: var(--accent-primary); padding: 15px; border-radius: 12px; width: 64px; height: 64px; display: flex; align-items: center; justify-content: center;">💻</div>
+                            <div>
+                                <div class="stat-label" style="font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;">ICT Identified</div>
+                                <div class="stat-value" id="analysis-ict-jobs" style="font-size: 28px; font-weight: 800; color: var(--accent-primary);">0</div>
+                            </div>
+                        </div>
+                        <div class="panel" style="padding: 24px; display: flex; align-items: center; gap: 20px;">
+                            <div class="icon" style="font-size: 32px; background: rgba(0, 206, 201, 0.1); color: var(--success); padding: 15px; border-radius: 12px; width: 64px; height: 64px; display: flex; align-items: center; justify-content: center;">🎯</div>
+                            <div>
+                                <div class="stat-label" style="font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;">ICT Rate</div>
+                                <div class="stat-value" id="analysis-ict-rate" style="font-size: 28px; font-weight: 800; color: var(--success);">0%</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="analysis-main-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+                        <!-- Weekly Trend -->
+                        <div class="panel" style="grid-column: span 2;">
+                            <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center;">
+                                <div class="panel-title">ICT Job Volume Trend</div>
+                                <select id="trend-period" class="form-select" onchange="loadAnalysis()" style="width: 140px; height: 32px; font-size: 12px; padding: 0 10px;">
+                                    <option value="day">Daily</option>
+                                    <option value="week" selected>Weekly</option>
+                                    <option value="month">Monthly</option>
+                                </select>
+                            </div>
+                            <div class="panel-body">
+                                <canvas id="trend-chart" style="max-height: 300px;"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Category Distribution -->
+                        <div class="panel">
+                            <div class="panel-header">
+                                <div class="panel-title">Domain Distribution (ICT Categories)</div>
+                            </div>
+                            <div class="panel-body">
+                                <canvas id="domain-chart" style="max-height: 400px;"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Country Distribution -->
+                        <div class="panel">
+                            <div class="panel-header">
+                                <div class="panel-title">ICT Distribution by Country</div>
+                            </div>
+                            <div class="panel-body">
+                                <canvas id="country-chart" style="max-height: 400px;"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Top Employers -->
+                        <div class="panel">
+                            <div class="panel-header">
+                                <div class="panel-title">Top ICT Employers</div>
+                            </div>
+                            <div class="panel-body" id="employers-list" style="padding: 20px;">
+                                <!-- Dynamic rows added by JS -->
+                            </div>
+                        </div>
+
+                        <!-- Source Breakdown -->
+                        <div class="panel">
+                            <div class="panel-header">
+                                <div class="panel-title">ICT Rate by Portal</div>
+                            </div>
+                            <div class="panel-body" id="portal-rates" style="padding: 20px;">
+                                <!-- Dynamic rows added by JS -->
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>

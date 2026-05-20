@@ -14,6 +14,7 @@ let currentDbCountry = '';  // e.g. 'UAE', 'KSA', 'Qatar', 'Kuwait', ''
 let localResultsPage = 1;
 let filteredLocalResults = [];
 let lastJobData = null; // Store last completed job info for toolbar updates
+let charts = {}; // Store Chart.js instances
 
 // ── DOM References ──────────────────────────────────────
 const urlInput = document.getElementById('url-input');
@@ -321,12 +322,12 @@ function renderResults(data) {
     }
 
     // Defined column order
-    const columnOrder = ['title', 'company', 'location', 'experience', 'posted'];
+    const columnOrder = ['title', 'company', 'location', 'experience', 'posted', 'is_ict', 'ict_category'];
 
     // Find which keys exist in the current filtered set to keep column structure consistent
     const dataForKeys = isViewingDatabase ? allResults : filteredLocalResults;
     const keys = columnOrder.filter(key =>
-        dataForKeys.some(row => row.hasOwnProperty(key))
+        dataForKeys.some(row => row.hasOwnProperty(key) || row.hasOwnProperty('_' + key))
     );
 
     let html = `
@@ -346,8 +347,15 @@ function renderResults(data) {
         html += `<td class="row-number">${idx + 1}</td>`;
 
         keys.forEach(key => {
-            let value = row[key] || '';
-            html += `<td title="${escapeHtml(value)}">${escapeHtml(truncate(value, 60))}</td>`;
+            let value = row[key] ?? row['_' + key] ?? '';
+            
+            if (key === 'is_ict') {
+                const isIct = value === true || value === 1 || value === "1" || value === "True";
+                value = isIct ? '<span class="status-badge completed" style="font-size: 10px; padding: 2px 6px;">ICT</span>' : '<span class="status-badge" style="font-size: 10px; padding: 2px 6px; opacity: 0.5;">No</span>';
+                html += `<td>${value}</td>`;
+            } else {
+                html += `<td title="${escapeHtml(value)}">${escapeHtml(truncate(value, 60))}</td>`;
+            }
         });
 
         html += '</tr>';
@@ -864,41 +872,279 @@ function selectDbPortal(source) {
 }
 
 function showView(view, source = '') {
+    const scraperLayout = document.getElementById('top-controls');
+    const resultsPanel = document.getElementById('results-panel');
+    const analysisView = document.getElementById('analysis-view');
+    const dbTabs = document.getElementById('db-portal-tabs');
+    const resultsPanelHeader = document.getElementById('results-panel-header');
+
     // Update nav active states
     document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
 
-    const dbControls = document.getElementById('db-portal-tabs');
-    const topControls = document.getElementById('top-controls');
-    const resultsPanelHeader = document.getElementById('results-panel-header');
-
-    if (view === 'database') {
+    if (view === 'analysis') {
+        const navAnalysis = document.getElementById('nav-analysis');
+        if (navAnalysis) navAnalysis.classList.add('active');
+        
+        if (scraperLayout) scraperLayout.style.display = 'none';
+        if (resultsPanel) resultsPanel.style.display = 'none';
+        if (analysisView) analysisView.style.display = 'block';
+        if (dbTabs) dbTabs.style.display = 'none';
+        
+        loadAnalysis();
+    } else if (view === 'database') {
         isViewingDatabase = true;
         currentDbSource = source;
-        dbControls.style.display = 'flex';
-        if (topControls) topControls.style.display = 'none';
-        resultsPanelHeader.style.display = 'none'; // hide the regular header because we have tabs
+        
+        if (scraperLayout) scraperLayout.style.display = 'none';
+        if (resultsPanel) resultsPanel.style.display = 'block';
+        if (analysisView) analysisView.style.display = 'none';
+        if (dbTabs) dbTabs.style.display = 'flex';
+        if (resultsPanelHeader) resultsPanelHeader.style.display = 'none';
 
-        // Highlight correct nav link
-        document.querySelector('.nav-dropdown .nav-link').classList.add('active');
+        // Highlight Database link
+        const dbLink = document.querySelector('.nav-dropdown .nav-link');
+        if (dbLink) dbLink.classList.add('active');
 
         viewDatabase(source);
     } else {
+        // Scraper View (Default)
         isViewingDatabase = false;
         currentDbSource = '';
-        dbControls.style.display = 'none';
-        if (topControls) topControls.style.display = 'grid';
-        resultsPanelHeader.style.display = 'flex';
+        
+        const navScraper = document.getElementById('nav-scraper');
+        if (navScraper) navScraper.classList.add('active');
+        
+        if (scraperLayout) scraperLayout.style.display = 'grid';
+        if (resultsPanel) resultsPanel.style.display = 'block';
+        if (analysisView) analysisView.style.display = 'none';
+        if (dbTabs) dbTabs.style.display = 'none';
+        if (resultsPanelHeader) resultsPanelHeader.style.display = 'flex';
 
-        // Highlight nav link
-        document.querySelector('.nav-link[onclick="showView(\'scraper\')"]').classList.add('active');
-
-        // If we have a current scrape job, view it, else show empty
         if (currentJobId && currentJobId !== 'database') {
             viewJob(currentJobId);
         } else {
             showEmptyState();
         }
     }
+}
+
+async function loadAnalysis() {
+    const country = document.getElementById('analysis-country').value;
+    const portal = document.getElementById('analysis-portal').value;
+    const period = document.getElementById('trend-period')?.value || 'week';
+    const startDate = document.getElementById('analysis-start')?.value || '';
+    const endDate = document.getElementById('analysis-end')?.value || '';
+    
+    const container = document.querySelector('.analysis-grid');
+    
+    // Add loading state
+    container.style.opacity = '0.5';
+    container.style.pointerEvents = 'none';
+
+    try {
+        const statsRes = await fetch(`/api/stats?country=${country}&source=${portal}`);
+        const analysisUrl = `/api/analysis?country=${country}&source=${portal}&period=${period}&start_date=${startDate}&end_date=${endDate}`;
+        const analysisRes = await fetch(analysisUrl);
+        
+        const stats = await statsRes.json();
+        const analysis = await analysisRes.json();
+        
+        document.getElementById('analysis-total-jobs').textContent = stats.total.toLocaleString();
+        document.getElementById('analysis-ict-jobs').textContent = stats.ict_count.toLocaleString();
+        document.getElementById('analysis-ict-rate').textContent = stats.ict_rate + '%';
+        
+        const impreciseEl = document.getElementById('analysis-imprecise-count');
+        if (impreciseEl) impreciseEl.textContent = (stats.imprecise_count || 0).toLocaleString();
+        
+        renderCategoryChart(analysis.category_distribution);
+        renderCountryChart(analysis.country_distribution);
+        renderTrendChart(analysis.weekly_trend);
+        renderEmployersList(analysis.top_employers);
+        renderPortalRates(analysis.source_rates);
+        
+    } catch (error) {
+        console.error('Analysis load failed:', error);
+        showToast('Failed to load analysis data', 'error');
+    } finally {
+        container.style.opacity = '1';
+        container.style.pointerEvents = 'auto';
+    }
+}
+
+function renderCategoryChart(data) {
+    const ctx = document.getElementById('domain-chart');
+    if (!ctx) return;
+    
+    if (charts.domain) charts.domain.destroy();
+    
+    if (!data || data.length === 0) {
+        return;
+    }
+
+    charts.domain = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: data.map(d => d.category),
+            datasets: [{
+                label: 'ICT Jobs',
+                data: data.map(d => d.count),
+                backgroundColor: 'rgba(108, 92, 231, 0.6)',
+                borderColor: '#6c5ce7',
+                borderWidth: 1,
+                borderRadius: 4
+            }]
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            plugins: { legend: { display: false } },
+            scales: {
+                x: { grid: { display: false } },
+                y: { grid: { display: false } }
+            }
+        }
+    });
+}
+
+function renderCountryChart(data) {
+    const ctx = document.getElementById('country-chart');
+    if (!ctx) return;
+    
+    if (charts.country) charts.country.destroy();
+    
+    charts.country = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+            labels: data.map(d => d.country),
+            datasets: [{
+                data: data.map(d => d.count),
+                backgroundColor: [
+                    '#6c5ce7', '#00cec9', '#fab1a0', '#fdcb6e', '#e17055'
+                ],
+                borderWidth: 0
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: { position: 'bottom' }
+            },
+            cutout: '70%'
+        }
+    });
+}
+
+function renderTrendChart(data) {
+    const ctx = document.getElementById('trend-chart');
+    if (!ctx) return;
+    
+    if (charts.trend) charts.trend.destroy();
+    
+    if (!data || data.length === 0) {
+        // Show placeholder if no trend data
+        const parent = ctx.parentElement;
+        if (parent) {
+            const placeholder = document.createElement('div');
+            placeholder.id = 'trend-empty';
+            placeholder.style = 'height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: 13px;';
+            placeholder.textContent = 'No trend data available for this selection';
+            ctx.style.display = 'none';
+            if (!document.getElementById('trend-empty')) parent.appendChild(placeholder);
+        }
+        return;
+    } else {
+        const empty = document.getElementById('trend-empty');
+        if (empty) empty.remove();
+        ctx.style.display = 'block';
+    }
+    
+    charts.trend = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: data.map(d => d.label),
+            datasets: [{
+                label: 'ICT Volume',
+                data: data.map(d => d.count),
+                borderColor: '#00cec9',
+                backgroundColor: 'rgba(0, 206, 201, 0.1)',
+                fill: true,
+                tension: 0.4,
+                pointRadius: 4,
+                pointBackgroundColor: '#00cec9',
+                borderWidth: 3
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { 
+                legend: { display: false },
+                tooltip: {
+                    mode: 'index',
+                    intersect: false,
+                    backgroundColor: 'rgba(30, 39, 46, 0.9)',
+                    titleColor: '#00cec9',
+                    bodyColor: '#fff',
+                    borderColor: 'rgba(255,255,255,0.1)',
+                    borderWidth: 1
+                }
+            },
+            scales: {
+                y: { 
+                    beginAtZero: true, 
+                    grid: { color: 'rgba(255,255,255,0.05)' },
+                    ticks: { color: 'var(--text-muted)' }
+                },
+                x: { 
+                    grid: { display: false },
+                    ticks: { color: 'var(--text-muted)', maxRotation: 45, minRotation: 45 }
+                }
+            }
+        }
+    });
+}
+
+function renderEmployersList(data) {
+    const container = document.getElementById('employers-list');
+    if (!data || data.length === 0) {
+        container.innerHTML = '<div style="text-align:center; padding: 20px; color: var(--text-muted);">No employer data</div>';
+        return;
+    }
+    
+    let html = '<table class="data-table"><thead><tr><th>Employer</th><th style="text-align:right">ICT Count</th></tr></thead><tbody>';
+    data.forEach(item => {
+        html += `
+            <tr>
+                <td style="font-weight: 500;">${escapeHtml(item.company)}</td>
+                <td style="text-align:right; font-family: JetBrains Mono; color: var(--accent-primary);">${item.count}</td>
+            </tr>
+        `;
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
+}
+
+function renderPortalRates(data) {
+    const container = document.getElementById('portal-rates');
+    if (!data || data.length === 0) {
+        container.innerHTML = '<div style="text-align:center; padding: 20px; color: var(--text-muted);">No portal data</div>';
+        return;
+    }
+    
+    let html = '<table class="data-table"><thead><tr><th>Portal</th><th style="text-align:right">ICT Rate</th></tr></thead><tbody>';
+    data.forEach(item => {
+        html += `
+            <tr>
+                <td style="font-weight: 500;">${escapeHtml(item.source)}</td>
+                <td style="text-align:right;">
+                    <span class="status-badge completed" style="font-family: JetBrains Mono;">${item.rate}%</span>
+                    <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">${item.ict} / ${item.total}</div>
+                </td>
+            </tr>
+        `;
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
 }
 
 async function viewDatabase(source = '', country = '') {

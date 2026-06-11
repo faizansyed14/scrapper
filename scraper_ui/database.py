@@ -21,6 +21,20 @@ except ImportError:
 
 DB_FILE = os.path.join(os.path.dirname(__file__), 'scraped_jobs.db')
 
+COUNTRY_ALIASES = {
+    'uae': 'UAE',
+    'ksa': 'KSA',
+    'qatar': 'Qatar',
+    'kuwait': 'Kuwait',
+}
+
+
+def normalize_country(country: str) -> str:
+    """Canonical country label — prevents Uae/UAE duplicates."""
+    if not country:
+        return ''
+    return COUNTRY_ALIASES.get(country.strip().lower(), country.strip())
+
 
 # ─── Connection helpers ────────────────────────────────────────────────────────
 
@@ -158,7 +172,7 @@ def save_job(job: dict) -> bool:
     experience = job.get('experience', '')
     posted     = job.get('posted', '')
     source     = job.get('source', '')
-    country    = job.get('country', '')
+    country    = normalize_country(job.get('country', ''))
     scrape_id  = job.get('scrape_id', '')
     is_ict     = 1 if job.get('_is_ict') else 0
     ict_category = job.get('ict_category', '')
@@ -191,12 +205,13 @@ def save_job(job: dict) -> bool:
 
 # ─── Batch insert (fast) ──────────────────────────────────────────────────────
 
-def save_jobs_batch(jobs: list[dict]) -> int:
+def save_jobs_batch(jobs: list[dict], ignore_duplicates: bool = False) -> int:
     """
     Insert many jobs in a single transaction.
     Returns the count of actually-inserted (new) rows.
 
-    This is ~10-50× faster than calling save_job() in a loop.
+    ignore_duplicates=True skips existing fingerprint rows (append import).
+    Jobs may include optional 'scraped_at' to preserve original scrape timestamp.
     """
     if not jobs:
         return 0
@@ -204,62 +219,63 @@ def save_jobs_batch(jobs: list[dict]) -> int:
     conn = get_db_connection()
     cursor = conn.cursor()
     inserted = 0
+    has_scraped_at = any(j.get('scraped_at') for j in jobs)
+
+    def _row(j):
+        base = (
+            j.get('title', ''),
+            j.get('company', ''),
+            j.get('location', ''),
+            j.get('experience', ''),
+            j.get('posted', ''),
+            j.get('source', ''),
+            normalize_country(j.get('country', '')),
+            j.get('scrape_id', ''),
+            1 if j.get('is_ict') or j.get('_is_ict') else 0,
+            j.get('ict_category', ''),
+            j.get('date_precision', 'precise'),
+        )
+        if has_scraped_at:
+            return base + (j.get('scraped_at') or None,)
+        return base
 
     try:
         if is_postgres():
-            rows = [
-                (
-                    j.get('title', ''),
-                    j.get('company', ''),
-                    j.get('location', ''),
-                    j.get('experience', ''),
-                    j.get('posted', ''),
-                    j.get('source', ''),
-                    j.get('country', ''),
-                    j.get('scrape_id', ''),
-                    1 if j.get('is_ict') or j.get('_is_ict') else 0,
-                    j.get('ict_category', ''),
-                    j.get('date_precision', 'precise'),
-                )
-                for j in jobs
-            ]
-            execute_values(
-                cursor,
-                '''
-                INSERT INTO jobs (title, company, location, experience, posted, source, country, scrape_id, is_ict, ict_category, date_precision)
-                VALUES %s
-                ON CONFLICT (title, company, location, source, country) 
-                DO UPDATE SET 
+            rows = [_row(j) for j in jobs]
+            cols = 'title, company, location, experience, posted, source, country, scrape_id, is_ict, ict_category, date_precision'
+            if has_scraped_at:
+                cols += ', scraped_at'
+            conflict = 'DO NOTHING' if ignore_duplicates else '''
+                DO UPDATE SET
                     is_ict = EXCLUDED.is_ict,
                     ict_category = EXCLUDED.ict_category,
                     posted = EXCLUDED.posted,
-                    date_precision = EXCLUDED.date_precision
+                    date_precision = EXCLUDED.date_precision,
+                    scraped_at = COALESCE(EXCLUDED.scraped_at, jobs.scraped_at)
+            '''
+            execute_values(
+                cursor,
+                f'''
+                INSERT INTO jobs ({cols})
+                VALUES %s
+                ON CONFLICT (title, company, location, source, country)
+                {conflict}
                 ''',
                 rows,
             )
             inserted = cursor.rowcount
         else:
-            rows = [
-                (
-                    j.get('title', ''),
-                    j.get('company', ''),
-                    j.get('location', ''),
-                    j.get('experience', ''),
-                    j.get('posted', ''),
-                    j.get('source', ''),
-                    j.get('country', ''),
-                    j.get('scrape_id', ''),
-                    1 if j.get('is_ict') or j.get('_is_ict') else 0,
-                    j.get('ict_category', ''),
-                    j.get('date_precision', 'precise'),
-                )
-                for j in jobs
-            ]
+            rows = [_row(j) for j in jobs]
+            verb = 'INSERT OR IGNORE' if ignore_duplicates else 'INSERT OR REPLACE'
+            cols = 'title, company, location, experience, posted, source, country, scrape_id, is_ict, ict_category, date_precision'
+            placeholders = '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?'
+            if has_scraped_at:
+                cols += ', scraped_at'
+                placeholders += ', ?'
             cursor.executemany(
-                '''
-                INSERT OR REPLACE INTO jobs
-                    (title, company, location, experience, posted, source, country, scrape_id, is_ict, ict_category, date_precision)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                f'''
+                {verb} INTO jobs ({cols})
+                VALUES ({placeholders})
                 ''',
                 rows,
             )
@@ -306,8 +322,9 @@ def _build_where(source, country, pg=False):
         clauses.append(f'source {"ILIKE" if pg else "LIKE"} {ph}')
         params.append(source)
     if country:
-        clauses.append(f'country {"ILIKE" if pg else "LIKE"} {ph}')
-        params.append(country)
+        norm = normalize_country(country)
+        clauses.append(f'LOWER(country) = LOWER({ph})')
+        params.append(norm)
     where = ('WHERE ' + ' AND '.join(clauses)) if clauses else ''
     return where, params
 

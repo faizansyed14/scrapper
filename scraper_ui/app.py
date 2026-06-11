@@ -633,7 +633,7 @@ def _scrape_site(url: str, site: str, max_pages: int, country: str = '', job_id:
                 seen_in_run.add(session_key)
 
                 # Stamp country and scrape_id onto the job dict
-                job['country'] = country
+                job['country'] = database.normalize_country(country)
                 job['scrape_id'] = job_id
 
                 fp = make_fingerprint(
@@ -835,6 +835,71 @@ def run_scrape(job_id: str, url: str, max_pages: int, site_type: str, country: s
 
 # ─── Excel export ─────────────────────────────────────────────────────────────
 
+def _excel_styles():
+    return {
+        'header_font': Font(name='Segoe UI', bold=True, color='FFFFFF', size=11),
+        'header_fill': PatternFill(start_color='1a1a2e', end_color='1a1a2e', fill_type='solid'),
+        'header_alignment': Alignment(horizontal='center', vertical='center', wrap_text=True),
+        'cell_font': Font(name='Segoe UI', size=10),
+        'cell_alignment': Alignment(vertical='top', wrap_text=True),
+        'thin_border': Border(
+            left=Side(style='thin', color='E0E0E0'),
+            right=Side(style='thin', color='E0E0E0'),
+            top=Side(style='thin', color='E0E0E0'),
+            bottom=Side(style='thin', color='E0E0E0'),
+        ),
+        'alt_fill': PatternFill(start_color='F5F5FA', end_color='F5F5FA', fill_type='solid'),
+    }
+
+
+def _is_ict_job(row: dict) -> bool:
+    val = row.get('is_ict', row.get('_is_ict', 0))
+    return val in (True, 1, '1', 'True')
+
+
+def _write_data_sheet(ws, group_rows: list[dict], column_order: list[str], skip_keys: set, styles: dict):
+    """Populate one worksheet with headers, rows, column widths."""
+    actual_keys = [k for k in column_order if any(k in row for row in group_rows)]
+    for row in group_rows:
+        for k in row.keys():
+            if k not in actual_keys and k not in skip_keys:
+                actual_keys.append(k)
+
+    for col, key in enumerate(actual_keys, 1):
+        cell = ws.cell(row=1, column=col, value=key.replace('_', ' ').title())
+        cell.font = styles['header_font']
+        cell.fill = styles['header_fill']
+        cell.alignment = styles['header_alignment']
+        cell.border = styles['thin_border']
+
+    for row_idx, row_data in enumerate(group_rows, 2):
+        for col_idx, key in enumerate(actual_keys, 1):
+            val = row_data.get(key, '')
+            if key == 'is_ict' and val == '':
+                val = row_data.get('_is_ict', '')
+            if key == 'is_ict':
+                val = 'Yes' if val in (True, 1, '1', 'True') else 'No'
+            if key == 'country' and val:
+                val = database.normalize_country(val)
+
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell.font = styles['cell_font']
+            cell.alignment = styles['cell_alignment']
+            cell.border = styles['thin_border']
+            if row_idx % 2 == 0:
+                cell.fill = styles['alt_fill']
+
+    for col_idx, key in enumerate(actual_keys, 1):
+        max_length = len(key) + 4
+        for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+            for cell in row:
+                if cell.value:
+                    max_length = max(max_length, min(len(str(cell.value)), 50))
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = max_length + 2
+
+    ws.freeze_panes = 'A2'
+
+
 def generate_excel(data: list[dict], filename: str) -> str:
     wb = Workbook()
     ws = wb.active
@@ -919,81 +984,26 @@ def generate_multi_excel(data: list[dict], filename: str) -> str:
     grouped_data = defaultdict(list)
     for row in data:
         source = row.get('source', 'Unknown').capitalize()
-        country = row.get('country', 'General').capitalize()
-        if not country:
-            country = 'General'
+        country = database.normalize_country(row.get('country', '')) or 'General'
         grouped_data[(source, country)].append(row)
 
-    # Styles
-    header_font      = Font(name='Segoe UI', bold=True, color='FFFFFF', size=11)
-    header_fill      = PatternFill(start_color='1a1a2e', end_color='1a1a2e', fill_type='solid')
-    header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    cell_font        = Font(name='Segoe UI', size=10)
-    cell_alignment   = Alignment(vertical='top', wrap_text=True)
-    thin_border      = Border(
-        left   = Side(style='thin', color='E0E0E0'),
-        right  = Side(style='thin', color='E0E0E0'),
-        top    = Side(style='thin', color='E0E0E0'),
-        bottom = Side(style='thin', color='E0E0E0'),
-    )
-    alt_fill = PatternFill(start_color='F5F5FA', end_color='F5F5FA', fill_type='solid')
+    styles = _excel_styles()
+    portal_column_order = ['title', 'company', 'location', 'experience', 'posted', 'is_ict', 'ict_category']
+    ict_column_order = ['title', 'company', 'location', 'experience', 'posted', 'source', 'country', 'is_ict', 'ict_category']
+    portal_skip = {'source', 'country', 'scrape_id', 'id', 'scraped_at'}
 
-    # Remove the default sheet
     default_sheet = wb.active
     wb.remove(default_sheet)
 
-    column_order = ['title', 'company', 'location', 'experience', 'posted', 'is_ict', 'ict_category']
-    
+    ict_rows = [r for r in data if _is_ict_job(r)]
+    if ict_rows:
+        ws_ict = wb.create_sheet(title='All ICT Jobs', index=0)
+        _write_data_sheet(ws_ict, ict_rows, ict_column_order, {'scrape_id', 'id'}, styles)
+
     for (source, country), group_rows in grouped_data.items():
-        # Sheet names can only be 31 characters max
         sheet_title = f"{source[:15]} - {country[:12]}"
         ws = wb.create_sheet(title=sheet_title)
-        
-        # Determine actual keys present in this group
-        actual_keys  = [k for k in column_order if any(k in row for row in group_rows)]
-        # Add any extra keys not in standard order
-        for row in group_rows:
-            for k in row.keys():
-                if k not in actual_keys and k not in ['source', 'country', 'scrape_id', 'id', 'scraped_at']:
-                    actual_keys.append(k)
-
-        # Write Headers
-        for col, key in enumerate(actual_keys, 1):
-            cell = ws.cell(row=1, column=col, value=key.replace('_', ' ').title())
-            cell.font      = header_font
-            cell.fill      = header_fill
-            cell.alignment = header_alignment
-            cell.border    = thin_border
-
-        # Write Rows
-        for row_idx, row_data in enumerate(group_rows, 2):
-            for col_idx, key in enumerate(actual_keys, 1):
-                val = row_data.get(key, '')
-                # Handle key variations (_is_ict vs is_ict)
-                if key == 'is_ict' and val == '':
-                    val = row_data.get('_is_ict', '')
-                
-                # Convert boolean/int to Yes/No
-                if key == 'is_ict':
-                    val = "Yes" if val in [True, 1, "1", "True"] else "No"
-
-                cell = ws.cell(row=row_idx, column=col_idx, value=val)
-                cell.font      = cell_font
-                cell.alignment = cell_alignment
-                cell.border    = thin_border
-                if row_idx % 2 == 0:
-                    cell.fill = alt_fill
-
-        # Auto-adjust column widths
-        for col_idx, key in enumerate(actual_keys, 1):
-            max_length = len(key) + 4
-            for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
-                for cell in row:
-                    if cell.value:
-                        max_length = max(max_length, min(len(str(cell.value)), 50))
-            ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = max_length + 2
-            
-        ws.freeze_panes = 'A2'
+        _write_data_sheet(ws, group_rows, portal_column_order, portal_skip, styles)
 
     wb.save(filepath)
     return filepath
@@ -1337,8 +1347,18 @@ def get_analysis():
             "rate": round((ict / total * 100), 2) if total > 0 else 0
         })
 
-    # Country distribution for ICT
-    country_query = f'SELECT country, COUNT(*) as count FROM jobs {where} {"AND" if "WHERE" in where else "WHERE"} is_ict = {"TRUE" if database.is_postgres() else "1"} GROUP BY country ORDER BY count DESC'
+    # Country distribution for ICT (normalized — no Uae/UAE split)
+    if database.is_postgres():
+        country_expr = """CASE LOWER(country)
+            WHEN 'uae' THEN 'UAE' WHEN 'ksa' THEN 'KSA'
+            WHEN 'qatar' THEN 'Qatar' WHEN 'kuwait' THEN 'Kuwait'
+            ELSE COALESCE(NULLIF(country, ''), 'Unknown') END"""
+    else:
+        country_expr = """CASE LOWER(country)
+            WHEN 'uae' THEN 'UAE' WHEN 'ksa' THEN 'KSA'
+            WHEN 'qatar' THEN 'Qatar' WHEN 'kuwait' THEN 'Kuwait'
+            ELSE CASE WHEN country IS NULL OR country = '' THEN 'Unknown' ELSE country END END"""
+    country_query = f'SELECT {country_expr} as country, COUNT(*) as count FROM jobs {where} {"AND" if "WHERE" in where else "WHERE"} is_ict = {"TRUE" if database.is_postgres() else "1"} GROUP BY {country_expr} ORDER BY count DESC'
     cursor.execute(country_query, params)
     country_data = [{"country": row[0] or "Unknown", "count": row[1]} for row in cursor.fetchall()]
 
@@ -1459,7 +1479,7 @@ def import_database():
 
             for p in sheet_parts:
                 if p.upper() in [c.upper() for c in known_countries]:
-                    inferred_country = p
+                    inferred_country = database.normalize_country(p)
                 if p.lower() in [s.lower() for s in known_portals]:
                     inferred_source = p
 
@@ -1483,9 +1503,11 @@ def import_database():
                 # ICT Classification
                 is_ict, ict_cat = classifier.classify_job(title)
                 
-                # Date Normalization
+                # Date Normalization (anchor to scraped_at when available)
+                from import_portal_data import resolve_posted_date
                 posted_str = job.get('posted') or job.get('posted_date') or job.get('date') or job.get('date_posted') or ""
-                norm_date, precision = normalize_posted_date(posted_str)
+                scraped_at = job.get('scraped_at') or ""
+                norm_date, precision = resolve_posted_date(posted_str, scraped_at)
 
                 job_data = {
                     'title': title,
@@ -1494,7 +1516,7 @@ def import_database():
                     'experience': job.get('experience') or "",
                     'posted': norm_date,
                     'source': job.get('source') or inferred_source,
-                    'country': job.get('country') or inferred_country,
+                    'country': database.normalize_country(job.get('country') or inferred_country),
                     'is_ict': is_ict,
                     'ict_category': ict_cat,
                     'date_precision': precision
